@@ -1,0 +1,49 @@
+{
+  "products": [
+    {
+      "id": "prod_sony_xm5",
+      "name": "Sony WH-1000XM5 Wireless Headphones",
+      "price": 348,
+      "originalPrice": 398,
+      "inStock": true,
+      "category": "Electronics"
+    },
+    {
+      "id": "prod_keychron_k2",
+      "name": "Keychron K2 Wireless Mechanical Keyboard",
+      "price": 89.99,
+      "originalPrice": 99.99,
+      "inStock": false,
+      "category": "Peripherals"
+    },
+    {
+      "id": "prod_dell_u2723qe",
+      "name": "Dell UltraSharp U2723QE 27\" 4K Monitor",
+      "price": 479.99,
+      "originalPrice": 529.99,
+      "inStock": true,
+      "category": "Electronics"
+    },
+    {
+      "id": "prod_sayl_chair",
+      "name": "Herman Miller Sayl Ergonomic Gaming Chair",
+      "price": 699.99,
+      "originalPrice": 799.99,
+      "inStock": true,
+      "category": "Office"
+    },
+    {
+      "id": "prod_ipad_air",
+      "name": "Apple iPad Air 11-inch M2 (128GB)",
+      "price": 599,
+      "originalPrice": 599,
+      "inStock": false,
+      "category": "Electronics"
+    }
+  ],
+  "domainMocks": {
+    "indigo.dev": false,
+    "dev.io": false,
+    "tech.ai": false
+  }
+}

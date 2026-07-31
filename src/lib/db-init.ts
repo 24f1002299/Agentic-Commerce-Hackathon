@@ -81,6 +81,17 @@ export async function ensureDatabaseSeeded() {
       );
     `);
 
+    // Ensure default user exists to satisfy foreign key constraints
+    const userRes = await prisma.$queryRawUnsafe<{ id: string }[]>(
+      `SELECT id FROM "User" WHERE id = 'usr_alex_rivera_demo' LIMIT 1;`
+    );
+    if (userRes.length === 0) {
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "User" (id, email, name, createdAt, updatedAt)
+        VALUES ('usr_alex_rivera_demo', 'alex.shopper@example.com', 'Alex Rivera', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+      `);
+    }
+
     // 2. Check if Rules already exist
     const existingRulesCountArr = await prisma.$queryRawUnsafe<{ count: number }[]>(
       `SELECT COUNT(*) as count FROM "Rule";`
@@ -90,19 +101,8 @@ export async function ensureDatabaseSeeded() {
     if (existingRulesCount === 0) {
       console.log('No rules found in database. Initializing seed data...');
       
-      // Create user if not exists
-      const userRes = await prisma.$queryRawUnsafe<{ id: string }[]>(
-        `SELECT id FROM "User" LIMIT 1;`
-      );
-      
-      let userId = userRes[0]?.id;
-      if (!userId) {
-        userId = 'usr_alex_rivera_demo';
-        await prisma.$executeRawUnsafe(`
-          INSERT INTO "User" (id, email, name)
-          VALUES ('${userId}', 'alex.shopper@example.com', 'Alex Rivera');
-        `);
-      }
+      const userId = 'usr_alex_rivera_demo';
+
 
       // Insert sample rules & audit logs representing all UI states
       const rules = [

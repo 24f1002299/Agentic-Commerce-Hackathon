@@ -119,3 +119,56 @@ export async function POST(req: Request) {
     );
   }
 }
+
+export async function PUT(req: Request) {
+  try {
+    await ensureDatabaseSeeded();
+    const body = await req.json();
+    const { ruleId, status, action, uiIcon = 'activity', pravaSessionId, receiptUrl } = body;
+
+    if (!ruleId || !status) {
+      return NextResponse.json(
+        { success: false, error: 'Missing required fields: ruleId, status' },
+        { status: 400 }
+      );
+    }
+
+    // Update rule status
+    await prisma.$executeRawUnsafe(`
+      UPDATE "Rule"
+      SET status = '${status}', updatedAt = CURRENT_TIMESTAMP
+      WHERE id = '${ruleId}';
+    `);
+
+    // Add optional audit log
+    if (action) {
+      const logId = `log_${Date.now()}`;
+      const pravaSessVal = pravaSessionId ? `'${pravaSessionId}'` : 'NULL';
+      const receiptVal = receiptUrl ? `'${receiptUrl}'` : 'NULL';
+      
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "AuditLog" (id, ruleId, action, timestamp, pravaSessionId, receiptUrl, uiIcon)
+        VALUES (
+          '${logId}', 
+          '${ruleId}', 
+          '${action.replace(/'/g, "''")}', 
+          CURRENT_TIMESTAMP, 
+          ${pravaSessVal}, 
+          ${receiptVal}, 
+          '${uiIcon}'
+        );
+      `);
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `Rule ${ruleId} updated to ${status}`,
+    });
+  } catch (error: any) {
+    console.error('API /api/rules PUT error:', error);
+    return NextResponse.json(
+      { success: false, error: error.message || 'Failed to update rule' },
+      { status: 500 }
+    );
+  }
+}
