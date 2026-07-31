@@ -48,6 +48,13 @@ export interface PravaTokenResult {
   txnLineItemId: string;
   /** Whether the token was generated locally (mock) or by the live Prava API */
   isMock: boolean;
+  /** The single-use virtual card details for checkout form entry */
+  tokenDetails?: {
+    card_number: string;
+    expiry: string;
+    cvv: string;
+    card_type: string;
+  };
 }
 
 // ─── Create Session ────────────────────────────────────────────────────────────
@@ -215,6 +222,12 @@ export async function generatePaymentToken(params: {
       paymentToken: session.payment_token,
       txnLineItemId: `tli_${Math.random().toString(36).slice(2, 10)}`,
       isMock: true,
+      tokenDetails: {
+        card_number: '4111111111111111',
+        expiry: '12/27',
+        cvv: '737',
+        card_type: 'Visa',
+      },
     };
   }
 
@@ -229,6 +242,7 @@ export async function generatePaymentToken(params: {
     paymentToken: result.payment_token,
     txnLineItemId: result.txn_line_item_id ?? `tli_${Date.now()}`,
     isMock: false,
+    tokenDetails: result.token_details,
   };
 }
 

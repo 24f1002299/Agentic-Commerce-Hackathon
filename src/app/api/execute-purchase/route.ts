@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { generatePaymentToken, reportPravaStatus } from '@/lib/prava-sdk';
 import { getProducts, getDomainMocks } from '@/lib/store-state';
+import { runPlaywrightCheckout } from '@/lib/playwright-checkout';
 
 const HARD_CAP = 60.0;
 
@@ -175,6 +176,8 @@ export async function POST(req: NextRequest) {
     // ── 6. Send token to the mock store / domain API ──────────────────────────
     let txnRefId = tokenResult.txnLineItemId;
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    let receiptUrl: string | null = null;
+    let fallbackUsed = false;
 
     if (isDomain) {
       const domainRes = await fetch(`${baseUrl}/api/check-domain`, {
@@ -195,26 +198,61 @@ export async function POST(req: NextRequest) {
     } else {
       // Product purchase
       if (productId) {
-        const checkoutRes = await fetch(`${baseUrl}/api/mock-store/checkout`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            productId,
-            price: purchasePrice,
-            paymentToken: tokenResult.paymentToken,
-          }),
-        });
-        const checkoutData = await checkoutRes.json();
-        if (!checkoutData.success) {
-          throw new Error(checkoutData.error || 'Storefront checkout failed.');
+        try {
+          const checkoutRes = await fetch(`${baseUrl}/api/mock-store/checkout`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              productId,
+              price: purchasePrice,
+              paymentToken: tokenResult.paymentToken,
+            }),
+          });
+          const checkoutData = await checkoutRes.json();
+          if (!checkoutData.success) {
+            throw new Error(checkoutData.error || 'Storefront checkout failed.');
+          }
+          txnRefId = checkoutData.txnRefId || txnRefId;
+        } catch (apiError: any) {
+          console.warn('[execute-purchase] Direct API checkout failed. Attempting Playwright browser fallback...', apiError.message);
+          
+          if (!tokenResult.tokenDetails) {
+            throw new Error(`Direct API checkout failed: ${apiError.message || 'Unknown error'}. No card credentials provided for browser fallback.`);
+          }
+
+          // Log that browser fallback was triggered
+          const logFallbackId = `log_exec_${Date.now()}_fallback`;
+          await prisma.$executeRawUnsafe(`
+            INSERT INTO "AuditLog" (id, ruleId, action, timestamp, uiIcon)
+            VALUES (
+              '${logFallbackId}', '${ruleId}',
+              'Direct API checkout failed. Initiating headless browser checkout fallback...',
+              CURRENT_TIMESTAMP, 'activity'
+            );
+          `);
+
+          const playwrightRes = await runPlaywrightCheckout({
+            checkoutUrl: `${baseUrl}/mock-store/checkout?productId=${productId}&price=${purchasePrice}`,
+            cardNumber: tokenResult.tokenDetails.card_number,
+            expiry: tokenResult.tokenDetails.expiry,
+            cvv: tokenResult.tokenDetails.cvv,
+          });
+
+          if (!playwrightRes.success || !playwrightRes.receiptUrl) {
+            throw new Error(`Playwright browser checkout fallback failed: ${playwrightRes.error || 'No receipt URL returned'}`);
+          }
+
+          receiptUrl = playwrightRes.receiptUrl;
+          fallbackUsed = true;
         }
-        txnRefId = checkoutData.txnRefId || txnRefId;
       }
     }
 
     // ── 7. Success: update DB, write audit logs, create CommerceTransaction ───
-    const receiptId = `rcpt_${Math.random().toString(36).slice(2, 10)}`;
-    const receiptUrl = `https://prava.pay/receipts/${receiptId}`;
+    if (!receiptUrl) {
+      const receiptId = `rcpt_${Math.random().toString(36).slice(2, 10)}`;
+      receiptUrl = `https://prava.pay/receipts/${receiptId}`;
+    }
 
     // Create CommerceTransaction record
     const txId = `tx_${Date.now()}`;
@@ -256,11 +294,14 @@ export async function POST(req: NextRequest) {
     const logSuccessId = `log_exec_${Date.now()}_success`;
     const safeToken = tokenResult.paymentToken.replace(/'/g, "''");
     const safeReceipt = receiptUrl.replace(/'/g, "''");
+    const successAction = fallbackUsed
+      ? `Autonomous payment authorized via Prava virtual card. Checkout completed successfully via browser fallback. Tx: ${txHash}`
+      : `Autonomous payment authorized via Prava virtual card. Checkout completed successfully. Tx: ${txHash}`;
     await prisma.$executeRawUnsafe(`
       INSERT INTO "AuditLog" (id, ruleId, action, timestamp, pravaSessionId, receiptUrl, uiIcon)
       VALUES (
         '${logSuccessId}', '${ruleId}',
-        'Autonomous payment authorized via Prava virtual card. Checkout completed successfully. Tx: ${txHash}',
+        '${successAction.replace(/'/g, "''")}',
         CURRENT_TIMESTAMP, '${safeToken}', '${safeReceipt}', 'check-circle'
       );
     `);

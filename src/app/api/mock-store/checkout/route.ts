@@ -14,21 +14,54 @@ import { getProducts, updateProduct } from '@/lib/store-state';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { productId, price, paymentToken } = body;
+    const { productId, price, paymentToken, cardNumber, expiry, cvv } = body;
 
-    if (!productId || price === undefined || !paymentToken) {
+    if (!productId || price === undefined) {
       return NextResponse.json(
-        { success: false, error: 'Missing required fields: productId, price, paymentToken' },
+        { success: false, error: 'Missing required fields: productId, price' },
         { status: 400 },
       );
     }
 
-    // Validate payment token format
-    if (!String(paymentToken).startsWith('prv_tok_') && !String(paymentToken).startsWith('prv_sess_')) {
+    const hasToken = !!paymentToken;
+    const hasCardDetails = !!(cardNumber && expiry && cvv);
+
+    if (!hasToken && !hasCardDetails) {
       return NextResponse.json(
-        { success: false, error: 'Invalid payment token format. Expected a Prava single-use token.' },
+        { success: false, error: 'Missing payment method: provide paymentToken OR cardNumber, expiry, cvv' },
         { status: 400 },
       );
+    }
+
+    if (hasToken) {
+      // Validate payment token format
+      if (!String(paymentToken).startsWith('prv_tok_') && !String(paymentToken).startsWith('prv_sess_')) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid payment token format. Expected a Prava single-use token.' },
+          { status: 400 },
+        );
+      }
+    } else {
+      // Validate card details format
+      const cleanCard = String(cardNumber).replace(/\s+/g, '');
+      if (cleanCard.length < 13 || cleanCard.length > 19) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid card number.' },
+          { status: 400 },
+        );
+      }
+      if (!String(expiry).includes('/')) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid expiration date format. Expected MM/YY.' },
+          { status: 400 },
+        );
+      }
+      if (String(cvv).trim().length < 3 || String(cvv).trim().length > 4) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid CVV.' },
+          { status: 400 },
+        );
+      }
     }
 
     const products = getProducts();
