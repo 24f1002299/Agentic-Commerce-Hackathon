@@ -32,6 +32,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ConversationalRuleInput } from "@/components/conversational-rule-input";
+import { AuditTimeline } from "@/components/audit-timeline";
 
 interface Product {
   id: string;
@@ -888,56 +889,15 @@ export default function Home() {
                               </div>
                             </div>
 
-                            {/* Rule Audit Log Timeline Expansion */}
+                            {/* Rule Audit Log Timeline Expansion — Live SSE */}
                             {isExpanded && (
-                              <div className="border-t border-slate-900 bg-slate-950/60 p-5 space-y-4">
-                                <h5 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
-                                  <Activity className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
-                                  Autonomous Audit Logs & Event Trace
-                                </h5>
-
-                                <div className="relative pl-6 space-y-5 border-l border-slate-800 mt-2 ml-2">
-                                  {rule.auditLogs?.map((log) => (
-                                    <div key={log.id} className="relative group">
-                                      {/* Timeline Circle */}
-                                      <div className="absolute -left-[31px] top-0.5 p-1 rounded-full bg-slate-950 border border-slate-700 text-slate-400 group-hover:border-blue-400 group-hover:text-blue-300 transition-colors">
-                                        {getLogIcon(log.uiIcon)}
-                                      </div>
-
-                                      <div className="space-y-1">
-                                        <div className="flex items-center gap-2">
-                                          <p className="text-xs font-semibold text-slate-200">{log.action}</p>
-                                          <span className="text-[9px] text-slate-500 font-mono">
-                                            {new Date(log.timestamp).toLocaleTimeString()}
-                                          </span>
-                                        </div>
-
-                                        {/* Prava payment transaction details inside log */}
-                                        {log.pravaSessionId && (
-                                          <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 text-[11px] font-mono text-slate-400 space-y-1 max-w-md">
-                                            <div className="flex justify-between">
-                                              <span>Prava Token Session:</span>
-                                              <span className="text-blue-400 font-bold">{log.pravaSessionId}</span>
-                                            </div>
-                                            {log.receiptUrl && (
-                                              <div className="flex justify-between">
-                                                <span>Receipt Verified:</span>
-                                                <a 
-                                                  href={log.receiptUrl} 
-                                                  target="_blank" 
-                                                  rel="noreferrer" 
-                                                  className="text-emerald-400 font-bold hover:underline flex items-center gap-0.5"
-                                                >
-                                                  View Receipt <CheckCircle2 className="w-3 h-3 text-emerald-400 inline" />
-                                                </a>
-                                              </div>
-                                            )}
-                                          </div>
-                                        )}
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
+                              <div className="border-t border-slate-900 bg-slate-950/60 p-5">
+                                <AuditTimeline
+                                  ruleId={rule.id}
+                                  initialLogs={rule.auditLogs as any}
+                                  currentStatus={rule.status}
+                                  liveMode={["ACTIVE", "TRIGGERED"].includes(rule.status)}
+                                />
                               </div>
                             )}
                           </div>
