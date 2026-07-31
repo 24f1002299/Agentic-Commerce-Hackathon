@@ -121,8 +121,8 @@ export function ConversationalRuleInput({ onRuleCreated }: ConversationalRuleInp
         throw new Error(data.error || "Failed to create rule");
       }
 
-      toast.success("Rule Activated & Saved!", {
-        description: `Monitoring ${editableTarget} with max budget $${numBudget.toFixed(2)}.`,
+      toast.success("Rule Registered & Drafted!", {
+        description: `Please authorize the security mandate to start monitoring ${editableTarget}.`,
       });
 
       if (onRuleCreated) {
