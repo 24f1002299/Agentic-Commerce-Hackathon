@@ -1,0 +1,54 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks        AgentTask[]
+  transactions CommerceTransaction[]
+}
+
+model AgentTask {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  status      String   @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  result      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model PaymentSession {
+  id           String   @id @default(uuid())
+  merchantId   String
+  amount       Float
+  currency     String   @default("USD")
+  status       String   @default("INITIATED") // INITIATED, AUTHORIZED, CAPTURED, FAILED
+  pravaTxId    String?
+  metadata     String?  // JSON string
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model CommerceTransaction {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemTitle   String
+  amount      Float
+  status      String   @default("COMPLETED")
+  txHash      String?
+  createdAt   DateTime @default(now())
+}
