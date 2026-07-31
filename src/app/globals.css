@@ -111,3 +111,30 @@
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(71, 85, 105, 1);
 }
+
+/* Pulse glow animation for hero bg elements */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+.animate-pulse-glow {
+  animation: pulse-glow 6s ease-in-out infinite;
+}
+
+/* Mobile-friendly horizontally scrollable tabs */
+.tabs-scroll {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 2px;
+}
+.tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+.tabs-scroll > * {
+  flex-shrink: 0;
+}
+

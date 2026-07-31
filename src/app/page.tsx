@@ -33,6 +33,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter }
 import { Input } from "@/components/ui/input";
 import { ConversationalRuleInput } from "@/components/conversational-rule-input";
 import { AuditTimeline } from "@/components/audit-timeline";
+import { SentinelCard } from "@/components/sentinel-card";
+import { SentinelEmptyState } from "@/components/sentinel-empty-state";
 
 interface Product {
   id: string;
@@ -66,6 +68,10 @@ interface Rule {
 }
 
 export default function Home() {
+  const conversationalInputRef = useRef<HTMLDivElement>(null);
+  const scrollToInput = () => {
+    conversationalInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
   // Store & API states
   const [products, setProducts] = useState<Product[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
@@ -463,7 +469,7 @@ export default function Home() {
   };
 
   return (
-    <div className="relative min-h-screen overflow-hidden px-4 py-12 sm:px-6 lg:px-8 max-w-7xl mx-auto space-y-12">
+    <div className="relative min-h-screen overflow-hidden px-4 py-8 sm:py-12 sm:px-6 lg:px-8 max-w-7xl mx-auto space-y-10 sm:space-y-12">
       {/* Dynamic Background Glow Elements */}
       <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[350px] bg-blue-600/15 blur-[120px] rounded-full pointer-events-none -z-10 animate-pulse-glow" />
       <div className="absolute top-2/3 right-10 w-[400px] h-[250px] bg-purple-600/15 blur-[100px] rounded-full pointer-events-none -z-10" />
@@ -488,17 +494,18 @@ export default function Home() {
         transition={{ duration: 0.6, delay: 0.1 }}
         className="text-center max-w-3xl mx-auto space-y-4"
       >
-        <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight">
+        <h1 className="text-3xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight leading-tight">
           Agentic Commerce <br />
           <span className="gradient-text">Conversational Intelligence</span>
         </h1>
-        <p className="text-base sm:text-lg text-slate-400 max-w-2xl mx-auto leading-relaxed">
+        <p className="text-sm sm:text-base lg:text-lg text-slate-400 max-w-2xl mx-auto leading-relaxed">
           Create autonomous purchase rules using natural language. The agent extracts targets, max budgets, and trigger conditions into structured rules.
         </p>
       </motion.div>
 
       {/* Conversational Rule Input Section */}
       <motion.div
+        ref={conversationalInputRef}
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6, delay: 0.2 }}
@@ -517,6 +524,57 @@ export default function Home() {
             setPasskeyError(null);
           }
         }} />
+      </motion.div>
+
+      {/* ===== SENTINEL DASHBOARD GRID ===== */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.6, delay: 0.28 }}
+        className="space-y-5"
+      >
+        {/* Section header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div className="space-y-0.5">
+            <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+              <ShieldCheck className="w-5 h-5 text-blue-400" />
+              Active Sentinels
+            </h2>
+            <p className="text-xs text-slate-500">
+              {rules.length === 0
+                ? "No sentinels created yet"
+                : `${rules.length} sentinel${rules.length !== 1 ? "s" : ""} registered · ${rules.filter(r => r.status === "ACTIVE").length} monitoring`}
+            </p>
+          </div>
+
+          {/* Live pulse indicator */}
+          {rules.length > 0 && (
+            <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 rounded-full px-3 py-1.5 w-fit">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
+              Agent Loop Active
+            </div>
+          )}
+        </div>
+
+        {/* Grid or Empty State */}
+        {rules.length === 0 ? (
+          <div className="rounded-2xl border border-slate-800/60 bg-slate-950/30 overflow-hidden">
+            <SentinelEmptyState onScrollToInput={scrollToInput} />
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {rules.map((rule, i) => (
+              <SentinelCard
+                key={rule.id}
+                rule={rule}
+                index={i}
+                isExpanded={expandedRule === rule.id}
+                onToggleExpand={setExpandedRule}
+                onApprove={handleApproveRule}
+              />
+            ))}
+          </div>
+        )}
       </motion.div>
 
       {/* Main Trigger & Simulator Control Dashboard */}
@@ -572,7 +630,7 @@ export default function Home() {
             </div>
 
             {/* Dashboard Tabs Navigation */}
-            <div className="flex gap-2 mt-4 border-t border-slate-800/80 pt-4">
+            <div className="tabs-scroll mt-4 border-t border-slate-800/80 pt-4">
               {(["storefront", "domains", "rules", "json"] as const).map((tab) => (
                 <button
                   key={tab}
@@ -832,8 +890,8 @@ export default function Home() {
                   </div>
 
                   {rules.length === 0 ? (
-                    <div className="text-center py-12 border border-slate-800 rounded-xl bg-slate-950/20 text-slate-400 text-sm">
-                      No rules registered yet. Use the Conversational Rule Input above to add one!
+                    <div className="rounded-xl border border-slate-800/60 bg-slate-950/20 overflow-hidden">
+                      <SentinelEmptyState onScrollToInput={scrollToInput} />
                     </div>
                   ) : (
                     <div className="space-y-3">
