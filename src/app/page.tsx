@@ -366,59 +366,37 @@ export default function Home() {
     }
   };
 
-  // Agent execution simulation code
+  // Autonomous Payment Execution Engine — calls /api/execute-purchase
   const triggerRulePurchase = useCallback(async (rule: Rule, matchedDetail: string, triggerSource: "store" | "domain") => {
     try {
-      // 1. Mark rule as TRIGGERED
-      await fetch("/api/rules", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ruleId: rule.id,
-          status: "TRIGGERED",
-          action: `Condition met: ${matchedDetail}. Initiating checkout sequence.`,
-          uiIcon: "zap"
-        })
-      });
-
-      // Show toast
-      toast.info(`Agent triggered for: "${rule.targetItem}"`, {
-        description: `Condition met: ${matchedDetail}. Authenticating Prava payment.`,
+      toast.info(`Sentinel executing purchase for: "${rule.targetItem}"`, {
+        description: `${matchedDetail}. Generating Prava payment token...`,
         duration: 5000
       });
 
-      // 2. Simulate Prava card session creation and autonomous checkout
-      setTimeout(async () => {
-        const fakeSessId = `prv_sess_${Math.random().toString(16).slice(2, 14)}`;
-        const fakeReceiptId = `rcpt_${Math.random().toString(36).slice(2, 10)}`;
-        const receiptUrl = `https://prava.pay/receipts/${fakeReceiptId}`;
+      // Call the canonical execution endpoint — enforces budget cap, calls Prava SDK,
+      // dispatches to mock storefront/domain, updates DB to SUCCESS.
+      const res = await fetch("/api/execute-purchase", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ruleId: rule.id })
+      });
 
-        // 3. Mark rule as SUCCESS with payment details
-        const successRes = await fetch("/api/rules", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ruleId: rule.id,
-            status: "SUCCESS",
-            action: `Autonomous payment authorized via Prava virtual card. Checkout completed successfully.`,
-            uiIcon: "check-circle",
-            pravaSessionId: fakeSessId,
-            receiptUrl: receiptUrl
-          })
+      const data = await res.json();
+
+      if (data.success) {
+        toast.success(`✅ Purchase Completed!`, {
+          description: `Prava token: ${data.paymentToken?.slice(0, 20)}... • $${data.purchaseAmount?.toFixed(2)}`,
+          duration: 7000
         });
-
-        const successData = await successRes.json();
-        if (successData.success) {
-          toast.success(`Purchase Completed!`, {
-            description: `Agent bought "${rule.targetItem}" for $${rule.maxBudget.toFixed(2)} via Prava virtual card.`,
-            duration: 6000
-          });
-          fetchData(true);
-        }
-      }, 2500);
-
-    } catch (err) {
-      console.error("Error triggering rule checkout:", err);
+        fetchData(true);
+      } else {
+        toast.error(`Purchase blocked: ${data.error}`, { duration: 7000 });
+        fetchData(true);
+      }
+    } catch (err: any) {
+      console.error("Error calling /api/execute-purchase:", err);
+      toast.error("Execution engine error", { description: err.message });
     }
   }, [fetchData]);
 
@@ -496,9 +474,9 @@ export default function Home() {
         transition={{ duration: 0.5 }}
         className="flex items-center justify-center"
       >
-        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full border border-blue-500/30 bg-blue-950/40 text-blue-400 text-xs font-medium backdrop-blur-md shadow-lg shadow-blue-950/50">
-          <Sparkles className="w-3.5 h-3.5 text-blue-400 animate-pulse" />
-          <span>Phase 3 Active • Passkey Mandate UX</span>
+        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-950/40 text-emerald-400 text-xs font-medium backdrop-blur-md shadow-lg shadow-emerald-950/50">
+          <Zap className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+          <span>Phase 4 Active • Autonomous Execution Engine</span>
         </div>
       </motion.div>
 
@@ -1081,6 +1059,109 @@ export default function Home() {
         </motion.div>
       </div>
 
+      {/* Prava Dashboard — Live Transactions Panel */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.6, delay: 0.35 }}
+        className="pt-4"
+      >
+        <Card className="glass-card border-slate-800 shadow-2xl overflow-hidden">
+          <CardHeader className="border-b border-slate-800/80 bg-slate-950/20 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <CardTitle className="text-lg font-bold">Prava Dashboard — Completed Transactions</CardTitle>
+                <CardDescription className="text-xs">Live view of autonomous purchases executed via Prava single-use payment tokens</CardDescription>
+              </div>
+              <div className="ml-auto flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
+                <span className="text-emerald-400">Sandbox Live</span>
+              </div>
+            </div>
+          </CardHeader>
+
+          <CardContent className="p-6">
+            {rules.filter(r => r.status === "SUCCESS").length === 0 ? (
+              <div className="text-center py-10 border border-dashed border-slate-800 rounded-xl bg-slate-950/20 text-slate-400 text-sm space-y-2">
+                <ShieldCheck className="w-8 h-8 mx-auto text-slate-600" />
+                <p>No completed transactions yet.</p>
+                <p className="text-xs text-slate-500">Approve an active rule and satisfy its conditions to trigger an autonomous purchase.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {rules.filter(r => r.status === "SUCCESS").map(rule => {
+                  const successLog = rule.auditLogs?.find(l => l.uiIcon === "check-circle");
+                  const tokenLog = rule.auditLogs?.find(l => l.uiIcon === "credit-card" && l.pravaSessionId);
+                  return (
+                    <div key={rule.id} className="p-4 rounded-xl border border-emerald-500/20 bg-emerald-950/10 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
+                            <CheckCircle2 className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <p className="font-bold text-sm text-slate-100">{rule.targetItem}</p>
+                            <p className="text-[10px] text-slate-500 font-mono">{rule.id}</p>
+                          </div>
+                        </div>
+                        <div className="text-right space-y-0.5">
+                          <span className="text-[9px] uppercase font-bold px-2 py-0.5 rounded-full border bg-emerald-500/20 text-emerald-400 border-emerald-500/30">SUCCESS</span>
+                          <p className="text-xs text-slate-400 font-mono">${rule.maxBudget.toFixed(2)} max</p>
+                        </div>
+                      </div>
+
+                      {/* Prava Token Details */}
+                      <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 text-[11px] font-mono space-y-1.5">
+                        <div className="flex items-center gap-1.5 text-slate-400 mb-1">
+                          <CreditCard className="w-3 h-3 text-blue-400" />
+                          <span className="text-blue-400 uppercase tracking-wider font-bold text-[9px]">Prava Single-Use Token</span>
+                        </div>
+                        {tokenLog?.pravaSessionId ? (
+                          <div className="flex justify-between items-center">
+                            <span className="text-slate-500">Token ID:</span>
+                            <span className="text-blue-400 font-bold truncate max-w-[200px]">{tokenLog.pravaSessionId}</span>
+                          </div>
+                        ) : (
+                          <div className="text-slate-500 italic">Token data in audit log</div>
+                        )}
+                        {successLog?.receiptUrl && (
+                          <div className="flex justify-between items-center border-t border-slate-900 pt-1.5">
+                            <span className="text-slate-500">Receipt:</span>
+                            <a
+                              href={successLog.receiptUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-emerald-400 font-bold hover:underline flex items-center gap-1"
+                            >
+                              View Receipt <CheckCircle2 className="w-3 h-3 inline" />
+                            </a>
+                          </div>
+                        )}
+                        <div className="flex justify-between items-center border-t border-slate-900 pt-1.5">
+                          <span className="text-slate-500">Status:</span>
+                          <span className="text-emerald-400 font-bold">CAPTURED ✓</span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-slate-500">Reported to Prava:</span>
+                          <span className="text-emerald-400">APPROVED</span>
+                        </div>
+                      </div>
+
+                      {successLog && (
+                        <p className="text-[10px] text-slate-400 italic">{successLog.action}</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </motion.div>
+
       {/* Mandate / Passkey Security Confirmation Modal */}
       <AnimatePresence>
         {mandateRule && (
@@ -1224,7 +1305,7 @@ export default function Home() {
 
       {/* Footer */}
       <div className="mt-16 text-center text-xs text-slate-500 border-t border-slate-800/60 pt-6">
-        Agentic Commerce Hackathon • Phase 3 Active • Passkey Mandate UX
+        Agentic Commerce Hackathon • Phase 4 Active • Autonomous Payment Execution Engine
       </div>
     </div>
   );

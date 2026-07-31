@@ -104,7 +104,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { domain, available } = body;
+    const { domain, available, action, price, paymentToken } = body;
 
     if (!domain) {
       return NextResponse.json(
@@ -113,13 +113,50 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    updateDomainMock(domain, !!available);
+    const cleanDomain = domain.toLowerCase().trim();
+
+    // ── Domain Registration (purchase) action ──────────────────────────────────
+    if (action === 'register') {
+      if (!paymentToken) {
+        return NextResponse.json(
+          { success: false, error: 'Missing required field: paymentToken' },
+          { status: 400 }
+        );
+      }
+
+      // Validate Prava token format
+      if (!String(paymentToken).startsWith('prv_tok_') && !String(paymentToken).startsWith('prv_sess_')) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid payment token format. Expected a Prava single-use token.' },
+          { status: 400 }
+        );
+      }
+
+      // Mark domain as registered/taken in the persistent mock
+      updateDomainMock(cleanDomain, false);
+
+      const txnRefId = `dom_tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      return NextResponse.json({
+        success: true,
+        domain: cleanDomain,
+        available: false,
+        registered: true,
+        txnRefId,
+        price: price ?? null,
+        message: `Domain "${cleanDomain}" successfully registered via Prava payment token.`,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // ── Availability mock toggle (existing behavior) ───────────────────────────
+    updateDomainMock(cleanDomain, !!available);
 
     return NextResponse.json({
       success: true,
-      domain: domain.toLowerCase().trim(),
+      domain: cleanDomain,
       available: !!available,
-      message: `Availability mock updated for ${domain}`,
+      message: `Availability mock updated for ${cleanDomain}`,
     });
   } catch (error: any) {
     console.error('API /api/check-domain POST error:', error);

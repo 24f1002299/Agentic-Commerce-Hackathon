@@ -1,6 +1,5 @@
 import { prisma } from './prisma';
 import { getProducts, getDomainMocks } from './store-state';
-import { executePurchase } from './execution-engine';
 
 const globalForMonitoring = globalThis as unknown as {
   monitoringEngineStarted: boolean | undefined;
@@ -8,6 +7,8 @@ const globalForMonitoring = globalThis as unknown as {
 
 /**
  * Runs a single monitoring iteration checking all ACTIVE rules.
+ * Delegates execution to /api/execute-purchase to keep a single source
+ * of truth for payment logic, budget caps, and audit logging.
  */
 export async function runMonitoringCheck() {
   try {
@@ -27,28 +28,25 @@ export async function runMonitoringCheck() {
 
     for (const rule of activeRules) {
       const target = rule.targetItem.toLowerCase().trim();
-      
+
       // Determine if it's a domain monitoring rule
-      const isDomain = target.endsWith('.dev') || 
-                       target.endsWith('.com') || 
-                       target.endsWith('.io') || 
-                       target.endsWith('.ai') || 
-                       target.endsWith('.net') || 
+      const isDomain = target.endsWith('.dev') ||
+                       target.endsWith('.com') ||
+                       target.endsWith('.io') ||
+                       target.endsWith('.ai') ||
+                       target.endsWith('.net') ||
                        target.includes('.');
 
+      let shouldExecute = false;
+
       if (isDomain) {
-        // Evaluate domain mock status
         const isAvailable = domainMocks[target];
         if (isAvailable === true) {
-          await executePurchase(
-            rule, 
-            `Domain ${rule.targetItem} became AVAILABLE for registration`
-          );
+          shouldExecute = true;
         }
       } else {
-        // Evaluate product rules
-        const matchedProduct = products.find(p => 
-          p.name.toLowerCase().includes(target) || 
+        const matchedProduct = products.find(p =>
+          p.name.toLowerCase().includes(target) ||
           target.includes(p.name.toLowerCase()) ||
           p.id.toLowerCase().includes(target)
         );
@@ -58,11 +56,26 @@ export async function runMonitoringCheck() {
           const isInStock = matchedProduct.inStock;
 
           if (isInStock && isPriceUnderBudget) {
-            await executePurchase(
-              rule, 
-              `Product is IN STOCK at $${matchedProduct.price.toFixed(2)} (Budget: $${rule.maxBudget.toFixed(2)})`
-            );
+            shouldExecute = true;
           }
+        }
+      }
+
+      if (shouldExecute) {
+        console.log(`[Monitoring Engine] Condition met for rule ${rule.id} ("${rule.targetItem}"). Delegating to /api/execute-purchase.`);
+
+        // Delegate to the canonical execution endpoint
+        const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+        try {
+          const res = await fetch(`${baseUrl}/api/execute-purchase`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ruleId: rule.id }),
+          });
+          const data = await res.json();
+          console.log(`[Monitoring Engine] execute-purchase result for rule ${rule.id}:`, data.rule_status);
+        } catch (fetchErr) {
+          console.error(`[Monitoring Engine] Failed to call /api/execute-purchase for rule ${rule.id}:`, fetchErr);
         }
       }
     }
