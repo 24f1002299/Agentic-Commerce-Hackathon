@@ -16,6 +16,7 @@ model User {
 
   tasks        AgentTask[]
   transactions CommerceTransaction[]
+  rules        Rule[]
 }
 
 model AgentTask {
@@ -52,3 +53,28 @@ model CommerceTransaction {
   txHash      String?
   createdAt   DateTime @default(now())
 }
+
+model Rule {
+  id                   String     @id @default(uuid())
+  userId               String
+  user                 User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  naturalLanguageQuery String
+  targetItem           String
+  maxBudget            Float
+  status               String     @default("PENDING_APPROVAL") // PENDING_APPROVAL, ACTIVE, TRIGGERED, SUCCESS, FAILED
+  auditLogs            AuditLog[]
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+}
+
+model AuditLog {
+  id             String   @id @default(uuid())
+  ruleId         String
+  rule           Rule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  action         String
+  timestamp      DateTime @default(now())
+  pravaSessionId String?
+  receiptUrl     String?
+  uiIcon         String   @default("search") // search, credit-card, check-circle, alert-triangle, etc.
+}
+
