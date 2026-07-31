@@ -246,9 +246,23 @@ function CheckoutContent() {
                   )}
                 </Button>
 
-                <div className="flex items-center gap-1.5 justify-center text-[10px] text-slate-500 select-none">
-                  <ShieldCheck className="w-3.5 h-3.5 text-blue-500/70" />
-                  <span>Prava Secured Virtual Card Authorization System</span>
+                <div className="flex flex-col items-center gap-2">
+                  <div className="flex items-center gap-1.5 text-[10px] text-slate-500 select-none">
+                    <ShieldCheck className="w-3.5 h-3.5 text-blue-500/70" />
+                    <span>
+                      Secured by{" "}
+                      <span className="text-blue-400 font-semibold">Visa Intelligent Commerce</span>
+                      {" "}via{" "}
+                      <span className="text-indigo-400 font-semibold">Prava</span>
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[10px] text-slate-600 select-none">
+                    <svg className="w-3 h-3 text-emerald-500/60 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 2a5 5 0 0 1 5 5v3a5 5 0 0 1-5 5 5 5 0 0 1-5-5V7a5 5 0 0 1 5-5z" />
+                      <path d="M7 15v1a5 5 0 0 0 10 0v-1" />
+                    </svg>
+                    <span>Intent parsed by <span className="text-emerald-500/80 font-semibold">OpenAI Structured Outputs</span></span>
+                  </div>
                 </div>
               </CardFooter>
             </Card>

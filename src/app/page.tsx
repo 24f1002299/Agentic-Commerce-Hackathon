@@ -1322,8 +1322,42 @@ export default function Home() {
       </AnimatePresence>
 
       {/* Footer */}
-      <div className="mt-16 text-center text-xs text-slate-500 border-t border-slate-800/60 pt-6">
-        Agentic Commerce Hackathon • Phase 4 Active • Autonomous Payment Execution Engine
+      <div className="mt-16 border-t border-slate-800/60 pt-6 pb-8">
+        <div className="flex flex-wrap items-center justify-center gap-4">
+          {/* Visa / Prava badge */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-blue-500/20 backdrop-blur-sm">
+            <svg className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="5" width="20" height="14" rx="2" />
+              <line x1="2" y1="10" x2="22" y2="10" />
+            </svg>
+            <span className="text-[10px] font-medium text-slate-400 tracking-wide">
+              Secured by{" "}
+              <span className="text-blue-400 font-semibold">Visa Intelligent Commerce</span>
+              {" "}via{" "}
+              <span className="text-indigo-400 font-semibold">Prava</span>
+            </span>
+          </div>
+
+          <span className="text-slate-700 text-xs hidden sm:inline">•</span>
+
+          {/* OpenAI badge */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-emerald-500/20 backdrop-blur-sm">
+            <svg className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2a5 5 0 0 1 5 5v3a5 5 0 0 1-5 5 5 5 0 0 1-5-5V7a5 5 0 0 1 5-5z" />
+              <path d="M7 15v1a5 5 0 0 0 10 0v-1" />
+            </svg>
+            <span className="text-[10px] font-medium text-slate-400 tracking-wide">
+              Intent understood by{" "}
+              <span className="text-emerald-400 font-semibold">OpenAI Structured Outputs</span>
+            </span>
+          </div>
+
+          <span className="text-slate-700 text-xs hidden sm:inline">•</span>
+
+          <span className="text-[10px] text-slate-600 tracking-wide">
+            Agentic Commerce Hackathon · Phase 5
+          </span>
+        </div>
       </div>
     </div>
   );

@@ -15,6 +15,7 @@ import {
   Sliders,
   ShieldCheck,
   CornerDownLeft,
+  Info,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -312,6 +313,14 @@ export function ConversationalRuleInput({ onRuleCreated }: ConversationalRuleInp
                     <label className="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
                       <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
                       Max Budget ($ USD)
+                      {/* OpenAI tooltip */}
+                      <span className="relative group/tip ml-auto cursor-default">
+                        <Info className="w-3 h-3 text-slate-500 hover:text-emerald-400 transition-colors" />
+                        <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-56 rounded-lg bg-slate-800 border border-emerald-500/30 px-3 py-2 text-[10px] font-normal normal-case tracking-normal text-slate-300 shadow-xl opacity-0 group-hover/tip:opacity-100 transition-opacity duration-200 z-50 leading-relaxed">
+                          <span className="text-emerald-400 font-semibold">Powered by OpenAI Structured Outputs</span> to understand your intent perfectly.
+                          <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-800" />
+                        </span>
+                      </span>
                     </label>
                     <div className="relative">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
