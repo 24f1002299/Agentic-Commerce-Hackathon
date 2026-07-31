@@ -11,3 +11,15 @@ export const prisma =
   });
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
+
+// Start background reactive monitoring engine on server startup using dynamic import to prevent circular dependencies
+if (typeof window === "undefined") {
+  import("./monitoring-engine")
+    .then(({ startMonitoringEngine }) => {
+      startMonitoringEngine();
+    })
+    .catch((err) => {
+      console.error("Failed to start monitoring engine:", err);
+    });
+}
+

@@ -313,82 +313,28 @@ export default function Home() {
     }
   }, [fetchData]);
 
-  // Agent loop monitor: runs checks against rules
+  // Agent loop monitor: runs checks against rules to sync UI in real-time
   useEffect(() => {
-    if (!isAgentRunning || products.length === 0 || rules.length === 0) return;
-
     const interval = setInterval(async () => {
-      // Fetch latest rules and products in the background
-      const rulesRes = await fetch("/api/rules");
-      const rulesData = await rulesRes.json();
-      
-      const prodRes = await fetch("/api/mock-store/products");
-      const prodData = await prodRes.json();
-
-      if (!rulesData.success || !prodData.success) return;
-
-      const latestRules: Rule[] = rulesData.rules;
-      const latestProducts: Product[] = prodData.products;
-
-      setRules(latestRules);
-      setProducts(latestProducts);
-      setLastCheckTime(new Date().toLocaleTimeString());
-
-      // Check each ACTIVE rule
-      for (const rule of latestRules) {
-        if (rule.status !== "ACTIVE") continue;
-
-        const target = rule.targetItem.toLowerCase();
+      try {
+        const rulesRes = await fetch("/api/rules");
+        const rulesData = await rulesRes.json();
         
-        // Scenario A: Check if domain rule
-        const isDomain = target.endsWith(".dev") || target.endsWith(".com") || target.endsWith(".io") || target.endsWith(".ai") || target.endsWith(".net") || target.includes(".");
-        
-        if (isDomain) {
-          // Domain rule: poll the check-domain api
-          try {
-            const domRes = await fetch(`/api/check-domain?domain=${encodeURIComponent(rule.targetItem)}`);
-            const domData = await domRes.json();
-            if (domData.success && domData.available) {
-              // Trigger!
-              setIsAgentRunning(false); // Pause loop to prevent duplicate triggers
-              await triggerRulePurchase(rule, `Domain ${rule.targetItem} became AVAILABLE for registration`, "domain");
-              setIsAgentRunning(true); // Resume
-              break;
-            }
-          } catch (e) {
-            console.error("Agent domain poll error:", e);
-          }
-        } else {
-          // Scenario B: Product price monitor rule
-          // Try to match target item name with mock products
-          const matchedProduct = latestProducts.find(p => 
-            p.name.toLowerCase().includes(target) || 
-            target.includes(p.name.toLowerCase()) ||
-            p.id.toLowerCase().includes(target)
-          );
+        const prodRes = await fetch("/api/mock-store/products");
+        const prodData = await prodRes.json();
 
-          if (matchedProduct) {
-            const isPriceUnderBudget = matchedProduct.price <= rule.maxBudget;
-            const isInStock = matchedProduct.inStock;
-
-            if (isInStock && isPriceUnderBudget) {
-              // Trigger!
-              setIsAgentRunning(false);
-              await triggerRulePurchase(
-                rule, 
-                `Product is IN STOCK at $${matchedProduct.price.toFixed(2)} (Budget: $${rule.maxBudget.toFixed(2)})`, 
-                "store"
-              );
-              setIsAgentRunning(true);
-              break;
-            }
-          }
+        if (rulesData.success && prodData.success) {
+          setRules(rulesData.rules);
+          setProducts(prodData.products);
+          setLastCheckTime(new Date().toLocaleTimeString());
         }
+      } catch (err) {
+        console.error("Error syncing monitor data:", err);
       }
     }, 4000);
 
     return () => clearInterval(interval);
-  }, [isAgentRunning, products, rules, triggerRulePurchase]);
+  }, []);
 
   // Dynamic Rule Status Badge Styling
   const getStatusBadge = (status: Rule["status"]) => {
