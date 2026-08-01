@@ -1,10 +1,44 @@
+---
 title: Sentinel Autonomous Procurement
 emoji: 🛡️
-colorFrom: indigo
-colorTo: purple
+colorFrom: blue
+colorTo: indigo
 sdk: docker
 app_port: 7860
 pinned: false
+---
+
+# Sentinel — Autonomous Procurement Agent
+
+AI-powered autonomous purchasing agent built for the Agentic Commerce Hackathon.
+
+## Features
+
+- Natural language purchase rules ("Buy an RTX 5090 when it drops below $2000")
+- Prava Payments mandate-based authorization with passkey approval
+- Autonomous monitoring engine (15s polling) for price drops & domain availability
+- Live RDAP domain availability checking
+- Mock storefront & domain simulator for testing
+- Full audit trail with Prava transaction receipts
+
+## Tech Stack
+
+- **Frontend**: Next.js 14, React 18, Tailwind CSS, Framer Motion
+- **Backend**: Next.js API Routes, Prisma ORM, SQLite
+- **Payments**: Prava Payments SDK (sandbox)
+- **Scraping**: Playwright (headless Chromium)
+- **Deployment**: Hugging Face Spaces (Docker)
+
+## Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `DATABASE_URL` | SQLite database path | `file:./dev.db` |
+| `PRAVA_API_KEY` | Prava secret key (`sk_test_...`) | — |
+| `PRAVA_CUSTOMER_ID` | Prava customer identity | `usr_agentic_commerce_hackathon` |
+| `PRAVA_MERCHANT_NAME` | Merchant name (must match dashboard) | `Agentic Commerce Hackathon` |
+| `PRAVA_MERCHANT_URL` | Merchant URL (must match dashboard) | `https://acme.com` |
+| `PORT` | Server port (HF mandates 7860) | `7860` |
 
 
 # 🛡️ Sentinel: Autonomous Reactive Procurement Agent
