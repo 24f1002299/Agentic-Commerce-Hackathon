@@ -565,8 +565,8 @@ export default function Home() {
         className="text-center max-w-3xl mx-auto space-y-4"
       >
         <h1 className="text-3xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight leading-tight">
-          Agentic Commerce <br />
-          <span className="gradient-text">Conversational Intelligence</span>
+          Sentinel <br />
+          <span className="gradient-text">Autonomous Procurement</span>
         </h1>
         <p className="text-sm sm:text-base lg:text-lg text-slate-400 max-w-2xl mx-auto leading-relaxed">
           Create autonomous purchase rules using natural language. The agent extracts targets, max budgets, and trigger conditions into structured rules.
@@ -1482,7 +1482,7 @@ export default function Home() {
           <span className="text-slate-700 text-xs hidden sm:inline">•</span>
 
           <span className="text-[10px] text-slate-600 tracking-wide">
-            Agentic Commerce Hackathon · Phase 5
+            Sentinel Autonomous Procurement · Phase 5
           </span>
         </div>
       </div>

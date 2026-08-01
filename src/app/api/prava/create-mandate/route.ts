@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
       productName: targetItem,
       // Must match the merchant profile in the Prava dashboard exactly.
       merchantName:
-        process.env.PRAVA_MERCHANT_NAME || 'Agentic Commerce Hackathon',
+        process.env.PRAVA_MERCHANT_NAME || 'Sentinel Autonomous Procurement',
       merchantUrl: process.env.PRAVA_MERCHANT_URL || 'https://acme.com',
       merchantCountry: 'US',
       recurringFrequency: 'one_time',
@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
           pravaTxId, metadata, createdAt, updatedAt
         ) VALUES (
           '${sessionId}',
-          '${(process.env.PRAVA_MERCHANT_NAME || 'Agentic Commerce Hackathon').replace(/'/g, "''")}',
+          '${(process.env.PRAVA_MERCHANT_NAME || 'Sentinel Autonomous Procurement').replace(/'/g, "''")}',
           ${budget},
           'USD',
           'INITIATED',

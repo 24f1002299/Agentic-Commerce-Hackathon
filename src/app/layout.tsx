@@ -16,7 +16,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Sentinel — Agentic Commerce by Prava",
+  title: "Sentinel — Autonomous Procurement by Prava",
   description:
     "Set a rule. Walk away. Sentinel autonomously monitors and buys the moment conditions are met — secured by Prava and Visa.",
 };

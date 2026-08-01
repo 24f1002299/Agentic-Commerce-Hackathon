@@ -38,7 +38,7 @@ export async function POST(req: Request) {
               {
                 role: 'system',
                 content:
-                  'You are an agentic commerce assistant. Extract rule details from the user prompt into structured JSON. Extract targetItem (e.g. domain name, product name), maxBudget (number in USD), and trigger (e.g. "Price drops below $60.00" or "Available for purchase").',
+                  'You are Sentinel, an autonomous procurement assistant. Extract rule details from the user prompt into structured JSON. Extract targetItem (e.g. domain name, product name), maxBudget (number in USD), and trigger (e.g. "Price drops below $60.00" or "Available for purchase").',
               },
               {
                 role: 'user',
