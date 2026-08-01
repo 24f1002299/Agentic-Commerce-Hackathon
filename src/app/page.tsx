@@ -35,6 +35,7 @@ import { ConversationalRuleInput } from "@/components/conversational-rule-input"
 import { AuditTimeline } from "@/components/audit-timeline";
 import { SentinelCard } from "@/components/sentinel-card";
 import { SentinelEmptyState } from "@/components/sentinel-empty-state";
+import { PurchaseSuccessOverlay } from "@/components/purchase-success-overlay";
 
 interface Product {
   id: string;
@@ -96,6 +97,13 @@ export default function Home() {
   const [mandateLoading, setMandateLoading] = useState(false);
   const [passkeyStatus, setPasskeyStatus] = useState<"idle" | "creating_mandate" | "triggering_passkey" | "verifying" | "success" | "error">("idle");
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
+
+  // Success overlay state
+  const [successOverlay, setSuccessOverlay] = useState<{ visible: boolean; itemName: string; amount: number }>({
+    visible: false, itemName: "", amount: 0
+  });
+  // Track previously-seen SUCCESS rule ids to detect new transitions
+  const seenSuccessIds = useRef<Set<string>>(new Set());
 
   // Load initial data
   const fetchData = useCallback(async (silent = false) => {
@@ -392,13 +400,32 @@ export default function Home() {
       const data = await res.json();
 
       if (data.success) {
-        toast.success(`✅ Purchase Completed!`, {
-          description: `Prava token: ${data.paymentToken?.slice(0, 20)}... • $${data.purchaseAmount?.toFixed(2)}`,
-          duration: 7000
+        setSuccessOverlay({
+          visible: true,
+          itemName: rule.targetItem,
+          amount: data.purchaseAmount ?? rule.maxBudget,
         });
         fetchData(true);
       } else {
-        toast.error(`Purchase blocked: ${data.error}`, { duration: 7000 });
+        // Friendly Sentinel wallet-protection message
+        const isBudgetBlock =
+          data.error?.includes("exceeds") ||
+          data.error?.includes("budget") ||
+          data.error?.includes("cap");
+        if (isBudgetBlock) {
+          toast.warning(
+            `🛡️ Sentinel protected your wallet`,
+            {
+              description: `Price exceeded your $${rule.maxBudget.toFixed(2)} cap. Rule paused — no charge made.`,
+              duration: 8000,
+            }
+          );
+        } else {
+          toast.error(`Purchase blocked`, {
+            description: data.error,
+            duration: 7000
+          });
+        }
         fetchData(true);
       }
     } catch (err: any) {
@@ -418,7 +445,31 @@ export default function Home() {
         const prodData = await prodRes.json();
 
         if (rulesData.success && prodData.success) {
-          setRules(rulesData.rules);
+          const newRules: Rule[] = rulesData.rules;
+          
+          // Detect newly-completed SUCCESS transitions for the overlay
+          newRules.forEach((r) => {
+            if (r.status === "SUCCESS" && !seenSuccessIds.current.has(r.id)) {
+              seenSuccessIds.current.add(r.id);
+              // Only pop overlay if we haven't shown it yet (first transition)
+              setSuccessOverlay((prev) => {
+                if (prev.visible) return prev; // don't interrupt an active overlay
+                const amount = r.auditLogs
+                  ?.slice()
+                  .reverse()
+                  .find((l) => l.uiIcon === "check-circle");
+                return {
+                  visible: true,
+                  itemName: r.targetItem,
+                  amount: r.maxBudget,
+                };
+              });
+            } else if (r.status === "SUCCESS") {
+              seenSuccessIds.current.add(r.id);
+            }
+          });
+
+          setRules(newRules);
           setProducts(prodData.products);
           setLastCheckTime(new Date().toLocaleTimeString());
         }
@@ -1320,6 +1371,14 @@ export default function Home() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* Purchase Success Overlay — confetti + checkmark animation */}
+      <PurchaseSuccessOverlay
+        visible={successOverlay.visible}
+        itemName={successOverlay.itemName}
+        amount={successOverlay.amount}
+        onDone={() => setSuccessOverlay((prev) => ({ ...prev, visible: false }))}
+      />
 
       {/* Footer */}
       <div className="mt-16 border-t border-slate-800/60 pt-6 pb-8">

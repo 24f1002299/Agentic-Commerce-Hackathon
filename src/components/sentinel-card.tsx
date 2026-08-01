@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AuditTimeline } from "@/components/audit-timeline";
+import { SentinelProtectedError } from "@/components/sentinel-protected-error";
 
 interface AuditLog {
   id: string;
@@ -86,12 +87,12 @@ const STATUS_CONFIG = {
     pulse: false,
   },
   FAILED: {
-    label: "Failed",
-    dot: "bg-rose-400",
-    badge: "bg-rose-500/15 text-rose-400 border-rose-500/30",
-    glow: "shadow-rose-900/20",
-    borderAccent: "border-t-rose-500/40",
-    icon: <AlertTriangle className="w-3.5 h-3.5" />,
+    label: "Sentinel Protected",
+    dot: "bg-amber-400",
+    badge: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+    glow: "shadow-amber-900/20",
+    borderAccent: "border-t-amber-500/40",
+    icon: <ShieldCheck className="w-3.5 h-3.5" />,
     pulse: false,
   },
 };
@@ -213,6 +214,20 @@ export function SentinelCard({ rule, index, isExpanded, onToggleExpand, onApprov
           </div>
         </div>
       </div>
+
+      {/* Friendly Sentinel wallet-protection error — always visible on FAILED cards */}
+      {rule.status === "FAILED" && (() => {
+        const lastFailLog = rule.auditLogs
+          ?.slice()
+          .reverse()
+          .find((l) => l.uiIcon === "alert-triangle" || l.action.includes("exceeded") || l.action.includes("violation") || l.action.includes("blocked") || l.action.includes("failed") || l.action.includes("Failed"));
+        return (
+          <SentinelProtectedError
+            budget={rule.maxBudget}
+            lastAuditAction={lastFailLog?.action}
+          />
+        );
+      })()}
 
       {/* Expanded audit timeline */}
       {isExpanded && (

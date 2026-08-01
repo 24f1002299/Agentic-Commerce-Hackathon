@@ -11,9 +11,9 @@
     {
       "id": "prod_keychron_k2",
       "name": "Keychron K2 Wireless Mechanical Keyboard",
-      "price": 89.99,
+      "price": 38,
       "originalPrice": 99.99,
-      "inStock": false,
+      "inStock": true,
       "category": "Peripherals"
     },
     {
@@ -27,7 +27,7 @@
     {
       "id": "prod_sayl_chair",
       "name": "Herman Miller Sayl Ergonomic Gaming Chair",
-      "price": 699.99,
+      "price": 59,
       "originalPrice": 799.99,
       "inStock": true,
       "category": "Office"
@@ -37,7 +37,7 @@
       "name": "Apple iPad Air 11-inch M2 (128GB)",
       "price": 599,
       "originalPrice": 599,
-      "inStock": false,
+      "inStock": true,
       "category": "Electronics"
     }
   ],
