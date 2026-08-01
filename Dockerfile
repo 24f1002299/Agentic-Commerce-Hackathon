@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
+# Prisma schema must be present for the postinstall `prisma generate` hook
+COPY prisma ./prisma
 RUN npm ci
 
 
