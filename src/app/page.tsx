@@ -97,6 +97,7 @@ export default function Home() {
   const [mandateLoading, setMandateLoading] = useState(false);
   const [passkeyStatus, setPasskeyStatus] = useState<"idle" | "creating_mandate" | "triggering_passkey" | "verifying" | "success" | "error">("idle");
   const [passkeyError, setPasskeyError] = useState<string | null>(null);
+  const [pravaHostedUrl, setPravaHostedUrl] = useState<string | null>(null);
 
   // Success overlay state
   const [successOverlay, setSuccessOverlay] = useState<{ visible: boolean; itemName: string; amount: number }>({
@@ -267,6 +268,13 @@ export default function Home() {
     setMandateLoading(true);
     setPasskeyStatus("creating_mandate");
     setPasskeyError(null);
+    setPravaHostedUrl(null);
+
+    // Open the tab while this function still runs directly from the user's
+    // click. Browsers may block a tab opened only after an awaited fetch.
+    const approvalWindow = typeof window !== "undefined"
+      ? window.open("about:blank", "_blank")
+      : null;
 
     try {
       // 1. Create mandate on backend
@@ -286,74 +294,81 @@ export default function Home() {
         throw new Error(mandateData.error || "Failed to initialize Prava mandate.");
       }
 
-      const { challenge, rp, user, sessionId } = mandateData;
+      const { sessionId, iframeUrl, isMock, pravaCustomerId } = mandateData;
+      if (!sessionId) {
+        throw new Error("Prava did not return a mandate setup session.");
+      }
 
-      // 2. Trigger native WebAuthn Credentials prompt
+        // 2. Open Prava's hosted checkout at the top level. This gives the
+        // browser a normal passkey context and keeps the card UI out of our
+        // constrained modal/iframe.
       setPasskeyStatus("triggering_passkey");
 
-      let credentialResult: any = null;
-      let usedFallback = false;
-
-      if (typeof window !== "undefined" && window.navigator && window.navigator.credentials) {
-        try {
-          const encoder = new TextEncoder();
-          const publicKeyCredentialCreationOptions: PublicKeyCredentialCreationOptions = {
-            challenge: Uint8Array.from(atob(challenge.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0)),
-            rp: {
-              name: rp.name,
-              id: window.location.hostname === "localhost" ? "localhost" : rp.id,
-            },
-            user: {
-              id: encoder.encode(user.id),
-              name: user.name,
-              displayName: user.displayName,
-            },
-            pubKeyCredParams: [
-              { alg: -7, type: "public-key" }, // ES256
-              { alg: -257, type: "public-key" } // RS256
-            ],
-            authenticatorSelection: {
-              userVerification: "preferred"
-            },
-            timeout: 30000,
-          };
-
-          credentialResult = await navigator.credentials.create({
-            publicKey: publicKeyCredentialCreationOptions
-          });
-        } catch (webauthnErr: any) {
-          console.warn("Native WebAuthn prompt failed or cancelled, using simulated secure fallback:", webauthnErr);
-          usedFallback = true;
-          toast.info("Using Simulated Passkey Fallback", {
-            description: "Native Passkey prompt was cancelled or is unavailable on this device."
-          });
-          await new Promise(resolve => setTimeout(resolve, 1500));
-        }
+      let mandateId: string | null = null;
+      if (isMock) {
+        // Local development without a secret key remains demonstrable, but is
+        // explicitly marked as simulated and never presented as live Prava.
+        toast.info("Using simulated Prava approval", {
+          description: "Add a sk_test_… key to use the real hosted approval surface."
+        });
+        await new Promise(resolve => setTimeout(resolve, 1200));
       } else {
-        console.warn("WebAuthn is not supported by this browser environment, using simulated fallback");
-        usedFallback = true;
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        if (!iframeUrl) {
+          throw new Error("Prava did not return the hosted approval URL.");
+        }
+
+        setPravaHostedUrl(iframeUrl);
+        if (approvalWindow) {
+          approvalWindow.location.href = iframeUrl;
+        } else {
+          toast.warning("Your browser blocked the Prava tab", {
+            description: "Use the Open Prava approval link in this dialog.",
+          });
+        }
+
+        // The hosted success event and the mandate list are eventually
+        // consistent, so allow a short window for the active mandate to appear.
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          const statusRes = await fetch(
+            `/api/prava/mandate-status?userId=${encodeURIComponent(pravaCustomerId || rule.userId)}&amount=${encodeURIComponent(rule.maxBudget)}`
+          );
+          const statusData = await statusRes.json();
+          if (!statusRes.ok || !statusData.success) {
+            throw new Error(statusData.error || "Failed to check Prava mandate status.");
+          }
+
+          if (statusData.status === "active" && statusData.mandateId) {
+            mandateId = statusData.mandateId;
+            approvalWindow?.close();
+            break;
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+
+        if (!mandateId) {
+          throw new Error("Prava approval timed out. Complete the approval in the Prava tab and try again.");
+        }
       }
 
       // 3. Verify mandate & activate rule
       setPasskeyStatus("verifying");
 
-      const credentialId = credentialResult ? credentialResult.id : `cred_${Math.random().toString(36).slice(2, 14)}`;
-
-      const actionMessage = usedFallback 
-        ? `Prava Mandate authorized via Passkey (Simulated Authentication). Rule activated.`
-        : `Prava Mandate authorized via secure Passkey (Credential ID: ${credentialId.slice(0, 15)}...). Rule activated.`;
+      const actionMessage = isMock
+        ? `Prava Mandate authorized in sandbox mock mode. Rule activated.`
+        : `Prava Mandate authorized via Prava's secure hosted passkey surface. Rule activated.`;
 
       const updateRes = await fetch("/api/rules", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ruleId: rule.id,
-          status: "ACTIVE",
-          action: actionMessage,
-          uiIcon: "lock",
-          pravaSessionId: sessionId
-        })
+           status: "ACTIVE",
+           action: actionMessage,
+           uiIcon: "lock",
+           // The charge endpoint needs the mdt_… id, not the sess_… setup id.
+           pravaSessionId: mandateId || sessionId
+         })
       });
 
       const updateData = await updateRes.json();
@@ -366,11 +381,12 @@ export default function Home() {
         description: `Sentinel is now actively monitoring ${rule.targetItem} with limit of $${rule.maxBudget.toFixed(2)}.`
       });
 
-      setTimeout(() => {
-        setMandateRule(null);
-        setPasskeyStatus("idle");
-        fetchData(true);
-      }, 1000);
+       setTimeout(() => {
+         setMandateRule(null);
+         setPasskeyStatus("idle");
+         setPravaHostedUrl(null);
+         fetchData(true);
+       }, 1000);
 
     } catch (err: any) {
       console.error("Passkey mandate flow error:", err);
@@ -481,19 +497,25 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
-  // Dynamic Rule Status Badge Styling
+  // Dynamic Rule Status Badge Styling — matches DESIGN.md §5.6
   const getStatusBadge = (status: Rule["status"]) => {
     switch (status) {
       case "ACTIVE":
-        return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+        // success-muted bg, success text, pulsing dot
+        return "border rounded-full px-[10px] h-6 inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.5px]" +
+               " bg-[rgba(16,185,129,0.15)] text-[#10B981] border-[rgba(16,185,129,0.3)]";
       case "PENDING_APPROVAL":
-        return "bg-amber-500/20 text-amber-400 border-amber-500/30";
+        return "border rounded-full px-[10px] h-6 inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.5px]" +
+               " bg-[rgba(245,158,11,0.15)] text-[#F59E0B] border-[rgba(245,158,11,0.3)]";
       case "TRIGGERED":
-        return "bg-purple-500/20 text-purple-400 border-purple-500/30 animate-pulse";
+        return "border rounded-full px-[10px] h-6 inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.5px] animate-pulse" +
+               " bg-[rgba(99,102,241,0.15)] text-[#6366F1] border-[rgba(99,102,241,0.3)]";
       case "SUCCESS":
-        return "bg-emerald-500/20 text-emerald-400 border-emerald-500/30";
+        return "border rounded-full px-[10px] h-6 inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.5px]" +
+               " bg-[rgba(16,185,129,0.15)] text-[#10B981] border-[rgba(16,185,129,0.3)]";
       case "FAILED":
-        return "bg-rose-500/20 text-rose-400 border-rose-500/30";
+        return "border rounded-full px-[10px] h-6 inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.5px]" +
+               " bg-[rgba(239,68,68,0.15)] text-[#EF4444] border-[rgba(239,68,68,0.3)]";
     }
   };
 
@@ -520,10 +542,7 @@ export default function Home() {
   };
 
   return (
-    <div className="relative min-h-screen overflow-hidden px-4 py-8 sm:py-12 sm:px-6 lg:px-8 max-w-7xl mx-auto space-y-10 sm:space-y-12">
-      {/* Dynamic Background Glow Elements */}
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[350px] bg-blue-600/15 blur-[120px] rounded-full pointer-events-none -z-10 animate-pulse-glow" />
-      <div className="absolute top-2/3 right-10 w-[400px] h-[250px] bg-purple-600/15 blur-[100px] rounded-full pointer-events-none -z-10" />
+    <div className="relative min-h-screen px-4 py-8 sm:py-12 sm:px-6 lg:px-8 max-w-7xl mx-auto space-y-10 sm:space-y-12">
 
       {/* Header Badge */}
       <motion.div 
@@ -532,9 +551,9 @@ export default function Home() {
         transition={{ duration: 0.5 }}
         className="flex items-center justify-center"
       >
-        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full border border-emerald-500/30 bg-emerald-950/40 text-emerald-400 text-xs font-medium backdrop-blur-md shadow-lg shadow-emerald-950/50">
-          <Zap className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-          <span>Phase 4 Active • Autonomous Execution Engine</span>
+        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full border text-xs font-medium" style={{borderColor:'rgba(99,102,241,0.3)',background:'rgba(99,102,241,0.08)',color:'var(--accent)'}}>
+          <Zap className="w-3.5 h-3.5 animate-pulse" />
+          <span>Sentinel is watching for you</span>
         </div>
       </motion.div>
 
@@ -563,8 +582,8 @@ export default function Home() {
         className="space-y-4"
       >
         <div className="text-center space-y-1">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-blue-400 flex items-center justify-center gap-1.5">
-            <Sparkles className="w-4 h-4" /> Conversational Agent Interface
+          <h2 className="text-sm font-semibold uppercase tracking-wider flex items-center justify-center gap-1.5" style={{color:'var(--accent)'}}>
+            <Sparkles className="w-4 h-4" /> Tell Sentinel what to watch for
           </h2>
         </div>
         <ConversationalRuleInput onRuleCreated={(rule) => {
@@ -587,8 +606,8 @@ export default function Home() {
         {/* Section header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="space-y-0.5">
-            <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-              <ShieldCheck className="w-5 h-5 text-blue-400" />
+            <h2 className="text-lg font-bold flex items-center gap-2" style={{color:'var(--text-primary)'}}>
+              <ShieldCheck className="w-5 h-5" style={{color:'var(--accent)'}} />
               Active Sentinels
             </h2>
             <p className="text-xs text-slate-500">
@@ -600,9 +619,9 @@ export default function Home() {
 
           {/* Live pulse indicator */}
           {rules.length > 0 && (
-            <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 rounded-full px-3 py-1.5 w-fit">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />
-              Agent Loop Active
+            <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider rounded-full px-3 py-1.5 w-fit" style={{color:'var(--success)',background:'var(--success-muted)',border:'1px solid rgba(16,185,129,0.3)'}}>
+              <span className="w-2 h-2 rounded-full animate-ping inline-block" style={{background:'var(--success)'}} />
+              Sentinel Active
             </div>
           )}
         </div>
@@ -696,9 +715,10 @@ export default function Home() {
                   }}
                   className={`px-4 py-2 text-xs font-semibold rounded-lg uppercase tracking-wider border transition-all ${
                     activeTab === tab
-                      ? "bg-blue-600/15 border-blue-500/40 text-blue-300"
-                      : "border-transparent bg-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+                      ? "border-[rgba(99,102,241,0.4)] text-[#818CF8]"
+                      : "border-transparent bg-transparent hover:bg-[#1A1A1E]"
                   }`}
+                  style={activeTab === tab ? {background:'rgba(99,102,241,0.1)',color:'#818CF8'} : {color:'var(--text-secondary)'}}
                 >
                   {tab === "storefront" && "🛍️ Storefront Products"}
                   {tab === "domains" && "🌐 Domain Checker"}
@@ -1182,19 +1202,19 @@ export default function Home() {
                         </div>
                       </div>
 
-                      {/* Prava Token Details */}
+                      {/* Safe Prava charge reference (never render card credentials) */}
                       <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 text-[11px] font-mono space-y-1.5">
                         <div className="flex items-center gap-1.5 text-slate-400 mb-1">
                           <CreditCard className="w-3 h-3 text-blue-400" />
-                          <span className="text-blue-400 uppercase tracking-wider font-bold text-[9px]">Prava Single-Use Token</span>
+                          <span className="text-blue-400 uppercase tracking-wider font-bold text-[9px]">Prava Charge</span>
                         </div>
                         {tokenLog?.pravaSessionId ? (
                           <div className="flex justify-between items-center">
-                            <span className="text-slate-500">Token ID:</span>
+                            <span className="text-slate-500">Mandate reference:</span>
                             <span className="text-blue-400 font-bold truncate max-w-[200px]">{tokenLog.pravaSessionId}</span>
                           </div>
                         ) : (
-                          <div className="text-slate-500 italic">Token data in audit log</div>
+                          <div className="text-slate-500 italic">Credential details are kept server-side</div>
                         )}
                         {successLog?.receiptUrl && (
                           <div className="flex justify-between items-center border-t border-slate-900 pt-1.5">
@@ -1231,142 +1251,190 @@ export default function Home() {
         </Card>
       </motion.div>
 
-      {/* Mandate / Passkey Security Confirmation Modal */}
+      {/* ─── Prava Passkey Approval Modal — DESIGN.md §4 + §8 ─────────────────
+           Calm, trust-focused. Budget is the visual anchor. No warnings.
+           ──────────────────────────────────────────────────────────────── */}
       <AnimatePresence>
         {mandateRule && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            {/* Backdrop */}
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+            {/* Backdrop — spec: rgba(0,0,0,0.6) + blur(4px) */}
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => {
-                if (!mandateLoading) setMandateRule(null);
-              }}
-              className="absolute inset-0 bg-slate-950/80 backdrop-blur-md"
+              onClick={() => { if (!mandateLoading) setMandateRule(null); }}
+              className="absolute inset-0 backdrop-blur-[4px]"
+              style={{ background: 'rgba(0,0,0,0.65)' }}
             />
 
-            {/* Modal Container */}
+            {/* Modal — spec: 440px max, 16px radius, --bg-elevated */}
             <motion.div
-              initial={{ scale: 0.95, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 20 }}
-              transition={{ type: "spring", duration: 0.5 }}
-              className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 p-6 shadow-2xl backdrop-blur-xl space-y-6 z-10"
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ duration: 0.2, ease: 'easeOut' }}
+              className="passkey-modal relative w-full sm:max-w-[440px] max-h-[calc(100vh-24px)] overflow-y-auto overflow-x-hidden z-10"
+              style={{
+                background: 'var(--bg-elevated)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: '16px 16px 0 0',
+                padding: '32px',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+                overscrollBehavior: 'contain',
+              }}
             >
-              {/* Top glow accent */}
-              <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-indigo-500 to-emerald-500" />
+              {/* Thin violet accent stripe at top */}
+              <div className="absolute top-0 left-0 right-0 h-[2px] rounded-t-2xl"
+                style={{ background: 'linear-gradient(90deg, #7C3AED 0%, #6366F1 100%)' }}
+              />
 
-              {/* Modal Header */}
-              <div className="flex items-center gap-4">
-                <div className="p-3 rounded-xl bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                  <ShieldCheck className="w-6 h-6 animate-pulse" />
+              {/* ── Header ─────────────────────────────────────────── */}
+              <div className="flex items-center gap-3 mb-6">
+                <div className="p-2.5 rounded-xl"
+                  style={{ background:'rgba(124,58,237,0.12)', border:'1px solid rgba(124,58,237,0.25)', color:'#7C3AED' }}
+                >
+                  <Lock className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-slate-100">Security Confirmation</h3>
-                  <p className="text-xs text-slate-400">Prava Secure Transaction Mandate Authorization</p>
+                  <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
+                    Authorize Sentinel
+                  </h3>
+                  <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
+                    Powered by Prava · Visa Network
+                  </p>
                 </div>
               </div>
 
-              {/* Modal Body / Mandate Warning */}
-              <div className="space-y-4">
-                <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-300 text-sm leading-relaxed space-y-2">
-                  <div className="flex gap-2">
-                    <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-                    <p className="font-semibold text-[13px]">
-                      Sentinel is authorized to spend a MAXIMUM of $60. It cannot exceed this. You will be notified before and after.
-                    </p>
-                  </div>
-                </div>
+              {/* ── Budget — visual anchor, largest element (spec §4) ─ */}
+              <div className="text-center py-6 mb-6 rounded-xl"
+                style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)' }}
+              >
+                <p className="text-xs uppercase tracking-wider mb-2" style={{ color: 'var(--text-tertiary)' }}>
+                  You are granting Sentinel permission to spend up to
+                </p>
+                <p className="font-mono font-bold" style={{ fontSize: '40px', lineHeight: 1, color: 'var(--text-primary)' }}>
+                  ${mandateRule.maxBudget.toFixed(2)}
+                </p>
+                <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
+                  maximum · one-time
+                </p>
+              </div>
 
-                <div className="p-4 rounded-xl border border-slate-800 bg-slate-950/50 space-y-3 text-xs text-slate-300">
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400 uppercase tracking-wider font-semibold text-[10px]">Target Asset</span>
-                    <span className="font-mono font-bold text-slate-200">{mandateRule.targetItem}</span>
-                  </div>
-                  <div className="flex justify-between items-center border-t border-slate-900 pt-2">
-                    <span className="text-slate-400 uppercase tracking-wider font-semibold text-[10px]">Limit Request</span>
-                    <span className="font-mono font-bold text-emerald-400 text-sm">${mandateRule.maxBudget.toFixed(2)} USD</span>
-                  </div>
-                  <div className="flex justify-between items-center border-t border-slate-900 pt-2">
-                    <span className="text-slate-400 uppercase tracking-wider font-semibold text-[10px]">Mandate Status</span>
-                    <span className="flex items-center gap-1 text-[10px] uppercase font-bold text-blue-400 px-2 py-0.5 rounded bg-blue-950/60 border border-blue-900/50">
-                      Awaiting Authorization
-                    </span>
-                  </div>
+              {/* ── Permission details ──────────────────────────────── */}
+              <div className="space-y-2 mb-6">
+                <div className="flex justify-between items-center py-2"
+                  style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                >
+                  <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>For</span>
+                  <span className="text-xs font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>
+                    {mandateRule.targetItem}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center py-2"
+                  style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                >
+                  <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>Valid for</span>
+                  <span className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>24 hours</span>
+                </div>
+                <div className="flex justify-between items-center pt-2">
+                  <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>Sentinel cannot exceed this amount. Ever.</span>
                 </div>
               </div>
 
-              {/* Passkey State Indicators */}
-              {passkeyStatus !== "idle" && (
-                <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800/80 text-xs text-slate-300 space-y-2 flex flex-col justify-center items-center text-center">
-                  {passkeyStatus === "creating_mandate" && (
+              {/* ── Passkey state feedback ──────────────────────────── */}
+              {passkeyStatus !== 'idle' && (
+                <div className="flex flex-col items-center gap-2 py-3 mb-4 rounded-lg text-xs text-center"
+                  style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)' }}
+                >
+                  {passkeyStatus === 'creating_mandate' && (
+                    <><RefreshCw className="w-4 h-4 animate-spin" style={{ color: 'var(--accent)' }} />
+                    <p style={{ color: 'var(--text-secondary)' }}>Initializing secure mandate with Prava...</p></>
+                  )}
+                  {passkeyStatus === 'triggering_passkey' && (
                     <>
-                      <RefreshCw className="w-5 h-5 text-blue-400 animate-spin" />
-                      <p>Initializing secure mandate session on Prava network...</p>
+                      <Lock className="w-4 h-4 animate-bounce" style={{ color: '#7C3AED' }} />
+                      <p className="font-semibold" style={{ color: 'var(--text-primary)' }}>
+                        Awaiting Prava approval...
+                      </p>
+                      {pravaHostedUrl ? (
+                        <div className="w-full rounded-lg border border-violet-500/30 bg-violet-500/10 p-4 space-y-3 text-left">
+                          <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                            Prava opened in a new tab
+                          </p>
+                          <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                            Complete the sandbox card and passkey approval there, then return here. This page will activate the rule automatically.
+                          </p>
+                          <a
+                            href={pravaHostedUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="flex h-10 w-full items-center justify-center rounded-lg bg-violet-600 px-3 text-xs font-semibold text-white hover:bg-violet-500"
+                          >
+                            Open Prava approval
+                          </a>
+                        </div>
+                      ) : (
+                        <p style={{ color: 'var(--text-tertiary)' }}>Preparing sandbox approval...</p>
+                      )}
                     </>
                   )}
-                  {passkeyStatus === "triggering_passkey" && (
-                    <>
-                      <Lock className="w-5 h-5 text-indigo-400 animate-bounce" />
-                      <p className="font-semibold text-indigo-300">Awaiting Passkey Authentication (Windows Hello / OS Prompt)...</p>
-                      <p className="text-[10px] text-slate-500">Please complete the native system security prompt to sign the mandate.</p>
-                    </>
+                  {passkeyStatus === 'verifying' && (
+                    <><RefreshCw className="w-4 h-4 animate-spin" style={{ color: 'var(--success)' }} />
+                    <p style={{ color: 'var(--text-secondary)' }}>Verifying and activating your sentinel...</p></>
                   )}
-                  {passkeyStatus === "verifying" && (
-                    <>
-                      <RefreshCw className="w-5 h-5 text-emerald-400 animate-spin" />
-                      <p>Verifying cryptographically signed mandate & activating rule...</p>
-                    </>
+                  {passkeyStatus === 'success' && (
+                    <><CheckCircle2 className="w-4 h-4" style={{ color: 'var(--success)' }} />
+                    <p className="font-semibold" style={{ color: 'var(--success)' }}>Sentinel is now watching for you!</p></>
                   )}
-                  {passkeyStatus === "success" && (
-                    <>
-                      <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                      <p className="text-emerald-300 font-bold">Mandate Signed & Authorized Successfully!</p>
-                    </>
-                  )}
-                  {passkeyStatus === "error" && (
-                    <div className="text-center space-y-1 w-full">
-                      <AlertTriangle className="w-5 h-5 text-rose-400 mx-auto" />
-                      <p className="text-rose-400 font-bold">Authentication Cancelled/Failed</p>
-                      <p className="text-[10px] text-slate-400 leading-normal max-h-16 overflow-y-auto">{passkeyError}</p>
-                      <Button 
+                  {passkeyStatus === 'error' && (
+                    <div className="space-y-2 w-full px-2">
+                      <p className="font-semibold" style={{ color: 'var(--danger)' }}>Authentication cancelled. No charge was made.</p>
+                      <p className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>{passkeyError}</p>
+                      <button
                         onClick={() => runPasskeyFlow(mandateRule)}
-                        variant="outline" 
-                        size="sm" 
-                        className="mt-2 text-xs border-slate-700 bg-slate-900 text-slate-200"
+                        className="mt-1 px-4 py-1.5 rounded-lg text-xs font-semibold transition-all"
+                        style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-subtle)' }}
                       >
-                        Retry Mandate Signature
-                      </Button>
+                        Retry
+                      </button>
                     </div>
                   )}
                 </div>
               )}
 
-              {/* Modal Actions */}
-              <div className="flex gap-3 justify-end pt-2 border-t border-slate-800/80">
-                <Button
-                  variant="outline"
-                  onClick={() => setMandateRule(null)}
-                  disabled={mandateLoading}
-                  className="border-slate-800 hover:bg-slate-800 text-slate-400 text-xs px-4"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  variant="glow"
-                  onClick={() => runPasskeyFlow(mandateRule)}
-                  disabled={mandateLoading || passkeyStatus === "success"}
-                  className="gap-2 px-5 text-xs text-blue-300 font-semibold"
-                >
-                  {mandateLoading ? (
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Lock className="w-3.5 h-3.5" />
-                  )}
-                  Authorize via Passkey
-                </Button>
-              </div>
+              {/* ── Passkey approve button — Prava brand color ────── */}
+              <button
+                onClick={() => runPasskeyFlow(mandateRule)}
+                disabled={mandateLoading || passkeyStatus === 'success'}
+                className="w-full flex items-center justify-center gap-2.5 font-semibold transition-all"
+                style={{
+                  height: '48px',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  background: mandateLoading || passkeyStatus === 'success'
+                    ? 'rgba(124,58,237,0.4)'
+                    : 'linear-gradient(135deg, #7C3AED 0%, #6366F1 100%)',
+                  color: '#FFFFFF',
+                  cursor: mandateLoading || passkeyStatus === 'success' ? 'not-allowed' : 'pointer',
+                  marginBottom: '12px',
+                }}
+              >
+                {mandateLoading
+                  ? <RefreshCw className="w-4 h-4 animate-spin" />
+                  : <Lock className="w-4 h-4" />
+                }
+                {passkeyStatus === 'success' ? 'Authorized ✓' : 'Approve with Passkey'}
+              </button>
+
+              {/* Cancel — ghost, small */}
+              <button
+                onClick={() => setMandateRule(null)}
+                disabled={mandateLoading}
+                className="w-full text-center text-xs transition-all py-2"
+                style={{ color: 'var(--text-tertiary)' }}
+              >
+                Cancel
+              </button>
             </motion.div>
           </div>
         )}

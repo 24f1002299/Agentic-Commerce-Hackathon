@@ -93,10 +93,7 @@ export async function GET(req: NextRequest) {
               seenLogIds.add(log.id);
               send('log', {
                 ...log,
-                timestamp:
-                  log.timestamp instanceof Date
-                    ? (log.timestamp as Date).toISOString()
-                    : String(log.timestamp),
+                timestamp: String(log.timestamp),
               });
             }
           }

@@ -1,375 +1,243 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import { generatePaymentToken, reportPravaStatus } from '@/lib/prava-sdk';
-import { getProducts, getDomainMocks } from '@/lib/store-state';
-import { runPlaywrightCheckout } from '@/lib/playwright-checkout';
-
-const HARD_CAP = 60.0;
+import {
+  listPravaMandates,
+  getPravaMandate,
+  chargePravaMandate,
+  reportPravaMandateCharge,
+  type PravaChargeResult,
+  type PravaReportResult,
+} from '@/lib/prava-sdk';
 
 /**
  * POST /api/execute-purchase
  *
- * Autonomous Payment Execution Engine.
+ * Called by the agent loop when a rule's condition is met (e.g. price drop).
  *
- * Flow:
- *  1. Fetch rule and validate it is in ACTIVE or TRIGGERED state.
- *  2. Resolve the current price from the mock storefront / domain checker.
- *  3. Enforce hard budget cap ($60.00) and rule maxBudget check.
- *  4. Call Prava SDK → generatePaymentToken (creates a Prava session and polls
- *     for the single-use mandate-backed credential).
- *  5. Send the token to the mock store checkout or domain registration API.
- *  6. On success → update Rule to SUCCESS, write audit logs, create
- *     CommerceTransaction, and call Prava reportStatus(APPROVED).
- *  7. On any failure → update Rule to FAILED, write failure audit log, call
- *     Prava reportStatus(DECLINED).
+ * Prava flow:
+ *   1. Find the active mandate for this customer
+ *   2. POST /v1/mandates/{id}/charge  → single-use card credentials
+ *   3. Use credentials to "checkout" at the store
+ *   4. POST /v1/mandates/{id}/charges/{txnId}/report → settle
+ *
+ * Docs:
+ *   - Charge:  docs.prava.space/api-reference/mandate-charge
+ *   - Report:  docs.prava.space/api-reference/report-a-mandate-charge
  */
 export async function POST(req: NextRequest) {
-  let ruleId: string | null = null;
-  let pravaSessionId: string | null = null;
+  // Hoist outside try so the catch block can reference it
+  let chargeResult: PravaChargeResult | null = null;
+  let reportResult: PravaReportResult | null = null;
+  let mandateId: string | null = null;
 
   try {
     const body = await req.json();
-    ruleId = body.ruleId;
+    const {
+      ruleId,
+      amount,
+      targetItem,
+      storeUrl,
+      userId = 'usr_sentinel_demo',
+    } = body;
 
-    if (!ruleId) {
+    const purchaseAmount = Number(amount);
+    if (!Number.isFinite(purchaseAmount) || purchaseAmount <= 0) {
       return NextResponse.json(
-        { success: false, error: 'Missing required field: ruleId' },
+        { success: false, error: 'Invalid amount' },
         { status: 400 },
       );
     }
 
-    // ── 1. Fetch rule ─────────────────────────────────────────────────────────
-    const rows = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT id, userId, naturalLanguageQuery, targetItem, maxBudget, status
-       FROM "Rule" WHERE id = '${ruleId}' LIMIT 1;`,
+    const pravaCustomerId =
+      process.env.PRAVA_CUSTOMER_ID || 'usr_agentic_commerce_hackathon';
+
+    // ── 1. Find the active mandate ─────────────────────────────────────
+    const mandates = await listPravaMandates(pravaCustomerId, true);
+    const activeMandate = mandates.find(
+      (m) => m.status === 'active' || m.state === 'available',
     );
 
-    if (!rows || rows.length === 0) {
-      return NextResponse.json(
-        { success: false, error: `Rule ${ruleId} not found.` },
-        { status: 404 },
-      );
-    }
-
-    const rule = rows[0];
-
-    if (!['ACTIVE', 'TRIGGERED'].includes(rule.status)) {
+    if (!activeMandate) {
       return NextResponse.json(
         {
           success: false,
-          error: `Rule is in state "${rule.status}". Only ACTIVE or TRIGGERED rules can be executed.`,
+          error:
+            'No active mandate found. Complete the passkey approval first (Approve with Passkey).',
+          mandatesFound: mandates.length,
         },
         { status: 409 },
       );
     }
 
-    // ── 2. Resolve purchase price & target info ───────────────────────────────
-    const target = rule.targetItem.toLowerCase().trim();
-    const isDomain =
-      target.endsWith('.dev') ||
-      target.endsWith('.com') ||
-      target.endsWith('.io') ||
-      target.endsWith('.ai') ||
-      target.endsWith('.net') ||
-      target.includes('.');
-
-    let purchasePrice: number = rule.maxBudget;
-    let productId: string | null = null;
-    let matchedDetail = '';
-
-    if (isDomain) {
-      // Domain: price is fixed at a nominal $10 registration fee (mock)
-      purchasePrice = 10.0;
-      matchedDetail = `Domain ${rule.targetItem} is AVAILABLE for registration`;
-    } else {
-      const products = getProducts();
-      const matchedProduct = products.find(
-        (p) =>
-          p.name.toLowerCase().includes(target) ||
-          target.includes(p.name.toLowerCase()) ||
-          p.id.toLowerCase().includes(target),
-      );
-
-      if (matchedProduct) {
-        purchasePrice = matchedProduct.price;
-        productId = matchedProduct.id;
-        matchedDetail = `${matchedProduct.name} is IN STOCK at $${matchedProduct.price.toFixed(2)} (Budget: $${rule.maxBudget.toFixed(2)})`;
-      } else {
-        matchedDetail = `Product matched rule: $${purchasePrice.toFixed(2)}`;
-      }
-    }
-
-    // ── 3. Mark rule as TRIGGERED and write initial audit log ─────────────────
-    await prisma.$executeRawUnsafe(
-      `UPDATE "Rule" SET status = 'TRIGGERED', updatedAt = CURRENT_TIMESTAMP WHERE id = '${ruleId}';`,
+    mandateId = activeMandate.id;
+    console.log(
+      `[execute-purchase] Using mandate ${mandateId} (status: ${activeMandate.status}, approved: $${activeMandate.approvedAmount})`,
     );
 
-    const logTrigId = `log_exec_${Date.now()}_trig`;
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO "AuditLog" (id, ruleId, action, timestamp, uiIcon)
-      VALUES (
-        '${logTrigId}', '${ruleId}',
-        'Condition met: ${matchedDetail.replace(/'/g, "''")}. Initiating autonomous checkout sequence.',
-        CURRENT_TIMESTAMP, 'zap'
+    // ── 2. Charge the mandate ──────────────────────────────────────────
+    // reference = idempotency key; same mandate+reference returns the
+    // original charge instead of minting a new one.
+    const reference = `rule_${ruleId}_${Date.now()}`;
+
+    chargeResult = await chargePravaMandate(
+      mandateId,
+      purchaseAmount,
+      reference,
+    );
+
+    if (chargeResult.status === 'failed') {
+      // Over-cap or network decline — report DECLINED and bail
+      console.warn(
+        `[execute-purchase] Charge failed: ${chargeResult.errorMessage}`,
       );
-    `);
 
-    // ── 4. Hard budget cap checks ─────────────────────────────────────────────
-    if (purchasePrice > HARD_CAP) {
-      await failRule(
-        ruleId,
-        `Hard cap violation: $${purchasePrice.toFixed(2)} exceeds system safety limit of $${HARD_CAP.toFixed(2)}. Purchase blocked.`,
-      );
-      return NextResponse.json({
-        success: false,
-        error: `Purchase blocked — amount $${purchasePrice.toFixed(2)} exceeds the hard cap of $${HARD_CAP.toFixed(2)}.`,
-        rule_status: 'FAILED',
-      });
-    }
-
-    if (purchasePrice > rule.maxBudget) {
-      await failRule(
-        ruleId,
-        `Budget violation: $${purchasePrice.toFixed(2)} exceeds rule max budget of $${rule.maxBudget.toFixed(2)}. Purchase blocked.`,
-      );
-      return NextResponse.json({
-        success: false,
-        error: `Purchase blocked — amount $${purchasePrice.toFixed(2)} exceeds rule max budget $${rule.maxBudget.toFixed(2)}.`,
-        rule_status: 'FAILED',
-      });
-    }
-
-    // ── 5. Generate Prava single-use Payment Token ────────────────────────────
-    const logTokenId = `log_exec_${Date.now()}_token`;
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO "AuditLog" (id, ruleId, action, timestamp, uiIcon)
-      VALUES (
-        '${logTokenId}', '${ruleId}',
-        'Requesting Prava single-use Payment Token against active mandate...',
-        CURRENT_TIMESTAMP, 'credit-card'
-      );
-    `);
-
-    const tokenResult = await generatePaymentToken({
-      userId: rule.userId || 'usr_alex_rivera_demo',
-      userEmail: 'alex.shopper@example.com',
-      amount: purchasePrice,
-      maxBudget: rule.maxBudget,
-      productName: rule.targetItem,
-      merchantName: isDomain ? 'Domain Registrar (Mock)' : 'Mock Commerce Store',
-      merchantUrl: isDomain ? 'https://mock-registrar.example.com' : 'http://localhost:3000/api/mock-store',
-    });
-
-    pravaSessionId = tokenResult.paymentToken; // used as session reference in audit logs
-
-    // Update the token audit log with the actual session id
-    const logTokenSessionId = `log_exec_${Date.now()}_sess`;
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO "AuditLog" (id, ruleId, action, timestamp, pravaSessionId, uiIcon)
-      VALUES (
-        '${logTokenSessionId}', '${ruleId}',
-        'Prava single-use Payment Token generated successfully${tokenResult.isMock ? ' (Sandbox/Mock)' : ''}.',
-        CURRENT_TIMESTAMP, '${tokenResult.paymentToken.replace(/'/g, "''")}', 'credit-card'
-      );
-    `);
-
-    // ── 6. Send token to the mock store / domain API ──────────────────────────
-    let txnRefId = tokenResult.txnLineItemId;
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-    let receiptUrl: string | null = null;
-    let fallbackUsed = false;
-
-    if (isDomain) {
-      const domainRes = await fetch(`${baseUrl}/api/check-domain`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'register',
-          domain: rule.targetItem,
-          price: purchasePrice,
-          paymentToken: tokenResult.paymentToken,
-        }),
-      });
-      const domainData = await domainRes.json();
-      if (!domainData.success) {
-        throw new Error(domainData.error || 'Domain registration failed.');
+      try {
+        reportResult = await reportPravaMandateCharge(
+          mandateId,
+          chargeResult.transactionId,
+          {
+            txnStatus: 'DECLINED',
+            amountPaid: '0.00',
+            responseCode: '05',
+          },
+        );
+      } catch (reportErr: any) {
+        console.warn('[execute-purchase] Report DECLINED failed:', reportErr.message);
       }
-      txnRefId = domainData.txnRefId || txnRefId;
-    } else {
-      // Product purchase
-      if (productId) {
-        try {
-          const checkoutRes = await fetch(`${baseUrl}/api/mock-store/checkout`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              productId,
-              price: purchasePrice,
-              paymentToken: tokenResult.paymentToken,
-            }),
-          });
-          const checkoutData = await checkoutRes.json();
-          if (!checkoutData.success) {
-            throw new Error(checkoutData.error || 'Storefront checkout failed.');
-          }
-          txnRefId = checkoutData.txnRefId || txnRefId;
-        } catch (apiError: any) {
-          console.warn('[execute-purchase] Direct API checkout failed. Attempting Playwright browser fallback...', apiError.message);
-          
-          if (!tokenResult.tokenDetails) {
-            throw new Error(`Direct API checkout failed: ${apiError.message || 'Unknown error'}. No card credentials provided for browser fallback.`);
-          }
 
-          // Log that browser fallback was triggered
-          const logFallbackId = `log_exec_${Date.now()}_fallback`;
-          await prisma.$executeRawUnsafe(`
-            INSERT INTO "AuditLog" (id, ruleId, action, timestamp, uiIcon)
-            VALUES (
-              '${logFallbackId}', '${ruleId}',
-              'Direct API checkout failed. Initiating headless browser checkout fallback...',
-              CURRENT_TIMESTAMP, 'activity'
-            );
-          `);
-
-          const playwrightRes = await runPlaywrightCheckout({
-            checkoutUrl: `${baseUrl}/mock-store/checkout?productId=${productId}&price=${purchasePrice}`,
-            cardNumber: tokenResult.tokenDetails.card_number,
-            expiry: tokenResult.tokenDetails.expiry,
-            cvv: tokenResult.tokenDetails.cvv,
-          });
-
-          if (!playwrightRes.success || !playwrightRes.receiptUrl) {
-            throw new Error(`Playwright browser checkout fallback failed: ${playwrightRes.error || 'No receipt URL returned'}`);
-          }
-
-          receiptUrl = playwrightRes.receiptUrl;
-          fallbackUsed = true;
-        }
-      }
-    }
-
-    // ── 7. Success: update DB, write audit logs, create CommerceTransaction ───
-    if (!receiptUrl) {
-      const receiptId = `rcpt_${Math.random().toString(36).slice(2, 10)}`;
-      receiptUrl = `https://prava.pay/receipts/${receiptId}`;
-    }
-
-    // Create CommerceTransaction record
-    const txId = `tx_${Date.now()}`;
-    const txHash = `0x${Math.random().toString(16).slice(2, 18)}${Math.random().toString(16).slice(2, 18)}`;
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO "CommerceTransaction" (id, userId, itemTitle, amount, status, txHash, createdAt)
-      VALUES (
-        '${txId}',
-        '${rule.userId || 'usr_alex_rivera_demo'}',
-        '${rule.targetItem.replace(/'/g, "''")}',
-        ${purchasePrice},
-        'COMPLETED',
-        '${txHash}',
-        CURRENT_TIMESTAMP
+      return NextResponse.json(
+        {
+          success: false,
+          error: `Charge declined: ${chargeResult.errorMessage || 'unknown'}`,
+          errorCode: chargeResult.errorCode,
+          mandateId,
+          transactionId: chargeResult.transactionId,
+        },
+        { status: 402 },
       );
-    `);
+    }
 
-    // Update PaymentSession if one exists (linked by pravaSessionId in audit logs)
+    // ── 3. Extract single-use card credentials ─────────────────────────
+    const creds = chargeResult.credentials;
+    if (!creds) {
+      throw new Error(
+        'Prava returned no credentials. fetchStatus: ' +
+          chargeResult.fetchStatus,
+      );
+    }
+
+    console.log(
+      `[execute-purchase] Got credentials: token=****${creds.token.slice(-4)}, ` +
+        `cvv=${creds.dynamicCvv}, exp=${creds.expiryMonth}/${creds.expiryYear}`,
+    );
+
+    // ── 4. Simulate checkout at the store ──────────────────────────────
+    // In a real integration you'd POST these credentials to the store's
+    // payment endpoint. For the hackathon we simulate a successful checkout.
+    const checkoutResult = {
+      success: true,
+      store: storeUrl || 'https://mock-store.demo',
+      item: targetItem || 'Unknown item',
+      amountCharged: purchaseAmount.toFixed(2),
+      cardUsed: `****${creds.token.slice(-4)}`,
+      transactionId: chargeResult.transactionId,
+      orderId: chargeResult.orderId,
+    };
+
+    // ── 5. Report APPROVED to Prava ────────────────────────────────────
+    // This settles the charge with Visa. For a one_time mandate the
+    // mandate moves to "consumed" after this.
+    reportResult = await reportPravaMandateCharge(
+      mandateId,
+      chargeResult.transactionId,
+      {
+        txnStatus: 'APPROVED',
+        amountPaid: purchaseAmount.toFixed(2),
+        authorizationCode: 'OK' + Date.now().toString(36).toUpperCase(),
+        responseCode: '00',
+      },
+    );
+
+    console.log(
+      `[execute-purchase] Report result: status=${reportResult.status}, ` +
+        `visa=${reportResult.visaConfirmation}, mandateStatus=${reportResult.mandateStatus}`,
+    );
+
+    // ── 6. Update DB ───────────────────────────────────────────────────
     try {
       await prisma.$executeRawUnsafe(`
         UPDATE "PaymentSession"
-        SET status = 'CAPTURED', updatedAt = CURRENT_TIMESTAMP
-        WHERE pravaTxId IN (
-          SELECT pravaSessionId FROM "AuditLog"
-          WHERE ruleId = '${ruleId}' AND pravaSessionId IS NOT NULL
-          LIMIT 1
-        );
+        SET status = 'COMPLETED',
+            metadata = metadata || '${JSON.stringify({
+              mandateId,
+              transactionId: chargeResult.transactionId,
+              orderId: chargeResult.orderId,
+              visaConfirmation: reportResult.visaConfirmation,
+              cardLast4: creds.token.slice(-4),
+            }).replace(/'/g, "''")}'::jsonb,
+            "updatedAt" = CURRENT_TIMESTAMP
+        WHERE "pravaTxId" = '${mandateId}'
+           OR id = '${mandateId}';
       `);
-    } catch (_) {
-      // Non-fatal — PaymentSession may not exist if mandate was simulated
+    } catch (dbErr: any) {
+      console.warn('[execute-purchase] DB update skipped:', dbErr.message);
     }
 
-    // Update rule to SUCCESS
-    await prisma.$executeRawUnsafe(
-      `UPDATE "Rule" SET status = 'SUCCESS', updatedAt = CURRENT_TIMESTAMP WHERE id = '${ruleId}';`,
-    );
+    // ── 7. Audit log ───────────────────────────────────────────────────
+    if (ruleId) {
+      const logId = `log_${Date.now()}`;
+      await prisma.$executeRawUnsafe(`
+        INSERT INTO "AuditLog" (id, ruleId, action, timestamp, pravaSessionId, uiIcon)
+        VALUES (
+          '${logId}',
+          '${ruleId}',
+          '${`Autonomous purchase executed: ${targetItem} for $${purchaseAmount.toFixed(2)}. Mandate ${mandateId} charged (txn: ${chargeResult.transactionId}). Visa confirmation: ${reportResult.visaConfirmation}.`.replace(/'/g, "''")}',
+          CURRENT_TIMESTAMP,
+          '${mandateId}',
+          'check-circle'
+        );
+      `);
+    }
 
-    // Write final success audit log
-    const logSuccessId = `log_exec_${Date.now()}_success`;
-    const safeToken = tokenResult.paymentToken.replace(/'/g, "''");
-    const safeReceipt = receiptUrl.replace(/'/g, "''");
-    const successAction = fallbackUsed
-      ? `Autonomous payment authorized via Prava virtual card. Checkout completed successfully via browser fallback. Tx: ${txHash}`
-      : `Autonomous payment authorized via Prava virtual card. Checkout completed successfully. Tx: ${txHash}`;
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO "AuditLog" (id, ruleId, action, timestamp, pravaSessionId, receiptUrl, uiIcon)
-      VALUES (
-        '${logSuccessId}', '${ruleId}',
-        '${successAction.replace(/'/g, "''")}',
-        CURRENT_TIMESTAMP, '${safeToken}', '${safeReceipt}', 'check-circle'
-      );
-    `);
-
-    // Report APPROVED status back to Prava (best-effort)
-    await reportPravaStatus({
-      sessionId: tokenResult.paymentToken,
-      txnRefId,
-      status: 'APPROVED',
-    }).catch((e) => console.warn('[execute-purchase] reportPravaStatus APPROVED failed:', e));
-
-    console.log(`[execute-purchase] Rule ${ruleId} completed → SUCCESS ($${purchasePrice.toFixed(2)})`);
-
+    // ── 8. Success response ────────────────────────────────────────────
     return NextResponse.json({
       success: true,
-      rule_status: 'SUCCESS',
-      purchaseAmount: purchasePrice,
-      paymentToken: tokenResult.paymentToken,
-      txnRefId,
-      txHash,
-      receiptUrl,
-      isMock: tokenResult.isMock,
+      checkout: checkoutResult,
+      prava: {
+        mandateId,
+        transactionId: chargeResult.transactionId,
+        orderId: chargeResult.orderId,
+        instructionId: chargeResult.instructionId,
+        visaConfirmation: reportResult.visaConfirmation,
+        mandateStatus: reportResult.mandateStatus,
+        deduplicated: chargeResult.deduplicated,
+      },
     });
-
   } catch (error: any) {
     console.error('[execute-purchase] Error:', error);
 
-    // Mark rule as FAILED and log
-    if (ruleId) {
-      await failRule(
-        ruleId,
-        `Execution failed: ${error.message || 'Unknown error'}`,
-      );
-
-      // Report DECLINED to Prava (best-effort)
-      if (pravaSessionId) {
-        await reportPravaStatus({
-          sessionId: pravaSessionId,
-          txnRefId: `fail_${Date.now()}`,
-          status: 'DECLINED',
-        }).catch(() => {});
+    // If we got a charge but failed later, try to report DECLINED
+    if (chargeResult && chargeResult.transactionId && mandateId && !reportResult) {
+      try {
+        await reportPravaMandateCharge(mandateId, chargeResult.transactionId, {
+          txnStatus: 'DECLINED',
+          amountPaid: '0.00',
+          responseCode: '99',
+        });
+        console.log('[execute-purchase] Reported DECLINED after error');
+      } catch {
+        // best-effort
       }
     }
 
     return NextResponse.json(
-      { success: false, error: error.message || 'Purchase execution failed', rule_status: 'FAILED' },
+      {
+        success: false,
+        error: error.message || 'Purchase execution failed',
+        mandateId,
+        transactionId: chargeResult?.transactionId ?? null,
+      },
       { status: 500 },
     );
-  }
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-async function failRule(ruleId: string, message: string) {
-  try {
-    await prisma.$executeRawUnsafe(
-      `UPDATE "Rule" SET status = 'FAILED', updatedAt = CURRENT_TIMESTAMP WHERE id = '${ruleId}';`,
-    );
-    const logId = `log_exec_${Date.now()}_fail`;
-    await prisma.$executeRawUnsafe(`
-      INSERT INTO "AuditLog" (id, ruleId, action, timestamp, uiIcon)
-      VALUES (
-        '${logId}', '${ruleId}',
-        '${message.replace(/'/g, "''")}',
-        CURRENT_TIMESTAMP, 'alert-triangle'
-      );
-    `);
-  } catch (e) {
-    console.error('[execute-purchase] failRule error:', e);
   }
 }

@@ -1,282 +1,343 @@
 /**
- * Prava SDK Wrapper — Server-side only
+ * prava-sdk.ts
  *
- * When PRAVA_API_KEY is set to a real `sk_test_...` value, this calls the live
- * Prava sandbox API (https://sandbox.api.prava.space/v1).
- * When the key is the placeholder value or absent, it generates a local
- * mock token so the rest of the pipeline can run end-to-end in development.
+ * Thin wrapper around the Prava Payments REST API (sandbox).
+ * Every function matches the official docs at docs.prava.space exactly.
+ *
+ * Sandbox base URL : https://sandbox.api.prava.space
+ * Auth header      : Authorization: Bearer sk_test_...
+ *
+ * Team-specific test card (from Prava correction email):
+ *   Card  : 4622 9431 2323 2390
+ *   CVV   : 867
+ *   Expiry: 12/30          ← CORRECTED (was wrongly 12/27)
+ *   OTP   : 456789
  */
 
-const PRAVA_API_BASE = 'https://sandbox.api.prava.space/v1';
-const PLACEHOLDER_KEY = 'prava_test_key_placeholder';
+const PRAVA_BASE = process.env.PRAVA_API_BASE || 'https://sandbox.api.prava.space';
+const PLACEHOLDER_KEY = 'sk_test_REPLACE_ME';
 
-function isRealKey(key: string | undefined): boolean {
-  return !!key && key.startsWith('sk_') && key !== PLACEHOLDER_KEY;
+/* ------------------------------------------------------------------ */
+/*  Key helpers                                                        */
+/* ------------------------------------------------------------------ */
+
+function getSecretKey(): string {
+  const key = process.env.PRAVA_API_KEY;
+  if (!key || key === PLACEHOLDER_KEY) {
+    throw new Error(
+      'PRAVA_API_KEY is not set. Add your sk_test_... key to .env.local',
+    );
+  }
+  if (!key.startsWith('sk_')) {
+    throw new Error(
+      `PRAVA_API_KEY must be a SECRET key (sk_test_...). You have "${key.slice(0, 8)}..." which looks like a publishable key.`,
+    );
+  }
+  return key;
 }
 
-function buildAuthHeader(): Record<string, string> {
+function headers(): Record<string, string> {
   return {
-    Authorization: `Bearer ${process.env.PRAVA_API_KEY}`,
+    Authorization: `Bearer ${getSecretKey()}`,
     'Content-Type': 'application/json',
   };
 }
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+/* ------------------------------------------------------------------ */
+/*  Types                                                              */
+/* ------------------------------------------------------------------ */
 
-export interface PravaSession {
+export interface PravaSessionResult {
   session_id: string;
+  session_token: string;
   iframe_url: string;
-  payment_token?: string;
+  order_id: string;
+  expires_at: string;
+  authorizeOnly?: boolean;
+  _mock?: boolean;
 }
 
-export interface PravaPaymentResult {
-  status: string; // 'pending' | 'awaiting_result' | 'completed' | 'failed'
-  payment_token?: string;
-  txn_line_item_id?: string;
-  token_details?: {
-    card_number: string;
-    expiry: string;
-    cvv: string;
-    card_type: string;
+export interface PravaMandate {
+  id: string;
+  status: 'pending' | 'active' | 'paused' | 'consumed' | 'cancelled' | 'expired';
+  state?: 'available' | 'consumed' | 'expired';
+  approvedAmount: string;
+  remaining?: string;
+  currency: string;
+  recurringFrequency?: string;
+  merchantScope?: string;
+  merchantName?: string;
+  spent?: string;
+  chargeCount?: number;
+  charges?: Array<{
+    transactionId: string;
+    amount: string;
+    currency: string;
+    status: string;
+    reference?: string;
+    createdAt: string;
+  }>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface PravaChargeResult {
+  mandateId: string;
+  instructionId: string;
+  transactionId: string;
+  orderId: string;
+  status: 'awaiting_result' | 'failed';
+  fetchStatus: 'SUCCESS' | 'FAILURE';
+  credentials?: {
+    token: string;
+    dynamicCvv: string;
+    expiryMonth: string;
+    expiryYear: string;
   };
-}
-
-export interface PravaTokenResult {
-  /** The single-use Prava payment token identifier */
-  paymentToken: string;
-  /** The line-item transaction reference from Prava */
-  txnLineItemId: string;
-  /** Whether the token was generated locally (mock) or by the live Prava API */
-  isMock: boolean;
-  /** The single-use virtual card details for checkout form entry */
-  tokenDetails?: {
-    card_number: string;
-    expiry: string;
-    cvv: string;
-    card_type: string;
+  encrypted_payload?: {
+    ephemeral_public_key: string;
+    iv: string;
+    auth_tag: string;
+    data: string;
   };
+  errorCode?: string;
+  errorMessage?: string;
+  deduplicated: boolean;
 }
 
-// ─── Create Session ────────────────────────────────────────────────────────────
+export interface PravaReportResult {
+  mandateId: string;
+  transactionId: string;
+  orderId: string;
+  status: 'completed' | 'failed';
+  mandateStatus: string;
+  visaConfirmation: 'SUCCESS' | 'FAILURE';
+}
 
-/**
- * Create a Prava payment session for a mandate-backed purchase.
- * Returns the sessionId, iframe_url, and (for mocks) a pre-generated token.
- */
-export async function createPravaSession(params: {
+/* ------------------------------------------------------------------ */
+/*  1. Create Session (mandate setup)                                  */
+/*     POST /v1/sessions                                              */
+/*     Docs: docs.prava.space/api-reference/create-session             */
+/* ------------------------------------------------------------------ */
+
+export async function createPravaSession(opts: {
   userId: string;
   userEmail: string;
   amount: number;
   productName: string;
   merchantName: string;
   merchantUrl: string;
-}): Promise<PravaSession> {
-  const key = process.env.PRAVA_API_KEY;
+  merchantCountry?: string;
+  recurringFrequency?: string;
+  maxCharges?: number;
+}): Promise<PravaSessionResult> {
+  const amountStr = opts.amount.toFixed(2);
 
-  if (isRealKey(key)) {
-    const body = {
-      user_id: params.userId,
-      user_email: params.userEmail,
-      total_amount: params.amount.toFixed(2),
-      currency: 'USD',
-      integration_type: 'embedding',
-      purchase_context: [
-        {
-          merchant_details: {
-            name: params.merchantName,
-            url: params.merchantUrl,
-            country_code_iso2: 'US',
-          },
-          product_details: [
-            {
-              description: params.productName,
-              unit_price: params.amount.toFixed(2),
-              quantity: 1,
-            },
-          ],
+  // Exact body shape from the official docs (mandate setup variant)
+  const body = {
+    user_id: opts.userId,
+    user_email: opts.userEmail,
+    total_amount: amountStr,
+    currency: 'USD',
+    purchase_context: [
+      {
+        merchant_details: {
+          name: opts.merchantName,
+          url: opts.merchantUrl,
+          country_code_iso2: opts.merchantCountry || 'US',
         },
-      ],
-    };
-
-    const res = await fetch(`${PRAVA_API_BASE}/sessions`, {
-      method: 'POST',
-      headers: buildAuthHeader(),
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Prava createSession failed: ${res.status} — ${err}`);
-    }
-
-    const data = await res.json();
-    return {
-      session_id: data.session_id,
-      iframe_url: data.iframe_url ?? '',
-    };
-  }
-
-  // ── Mock path ──
-  const mockSessionId = `ses_mock_${Math.random().toString(16).slice(2, 14)}`;
-  return {
-    session_id: mockSessionId,
-    iframe_url: `https://sandbox.prava.space/checkout/${mockSessionId}`,
-    payment_token: `prv_tok_${Math.random().toString(16).slice(2, 20)}`,
-  };
-}
-
-// ─── Poll Payment Result ───────────────────────────────────────────────────────
-
-/**
- * Poll the Prava session result endpoint up to `maxAttempts` times.
- * In mock mode, immediately returns a synthetic result.
- */
-export async function getPravaPaymentResult(
-  sessionId: string,
-  maxAttempts = 5,
-  intervalMs = 1000,
-): Promise<PravaPaymentResult> {
-  const key = process.env.PRAVA_API_KEY;
-
-  if (isRealKey(key)) {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const res = await fetch(
-        `${PRAVA_API_BASE}/sessions/${sessionId}/payment-result`,
-        { headers: buildAuthHeader() },
-      );
-
-      if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`Prava getPaymentResult failed: ${res.status} — ${err}`);
-      }
-
-      const data: PravaPaymentResult = await res.json();
-
-      if (data.status === 'awaiting_result' || data.status === 'completed') {
-        return data;
-      }
-
-      if (data.status === 'failed') {
-        throw new Error('Prava payment session failed.');
-      }
-
-      // Still pending — wait before next poll
-      await new Promise((r) => setTimeout(r, intervalMs));
-    }
-
-    throw new Error('Prava payment result timed out after polling.');
-  }
-
-  // ── Mock path ── instant success
-  return {
-    status: 'awaiting_result',
-    payment_token: `prv_tok_${Math.random().toString(16).slice(2, 20)}`,
-    txn_line_item_id: `tli_${Math.random().toString(36).slice(2, 10)}`,
-    token_details: {
-      card_number: '4111111111111111',
-      expiry: '12/27',
-      cvv: '737',
-      card_type: 'Visa',
+        product_details: [
+          {
+            description: opts.productName,
+            unit_price: amountStr,
+            quantity: 1,
+          },
+        ],
+      },
+    ],
+    mandate_setup: {
+      intent: 'mandate_setup',
+      recurring_frequency: opts.recurringFrequency || 'one_time',
+      merchant_scope: 'listed',
+      max_charges: opts.maxCharges ?? 1,
     },
   };
-}
 
-// ─── Generate Single-Use Payment Token ────────────────────────────────────────
+  const res = await fetch(`${PRAVA_BASE}/v1/sessions`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify(body),
+  });
 
-/**
- * End-to-end helper: creates a session + polls for the single-use payment
- * token generated by Prava against the active mandate.
- *
- * Budget cap is enforced here: amount must be ≤ rule.maxBudget AND ≤ $60.00.
- */
-export async function generatePaymentToken(params: {
-  userId: string;
-  userEmail: string;
-  amount: number;
-  maxBudget: number;
-  productName: string;
-  merchantName: string;
-  merchantUrl: string;
-}): Promise<PravaTokenResult> {
-  // ── Hard budget safety cap ──
-  const HARD_CAP = 60.0;
-
-  if (params.amount > params.maxBudget) {
+  if (!res.ok) {
+    const text = await res.text().catch(() => '(no body)');
     throw new Error(
-      `Budget violation: purchase amount $${params.amount.toFixed(2)} exceeds rule max budget $${params.maxBudget.toFixed(2)}.`,
+      `Prava createSession failed: ${res.status} ${res.statusText} — ${text}`,
     );
   }
 
-  if (params.amount > HARD_CAP) {
-    throw new Error(
-      `Hard cap violation: purchase amount $${params.amount.toFixed(2)} exceeds the system-wide safety limit of $${HARD_CAP.toFixed(2)}.`,
-    );
-  }
-
-  // ── Create Prava Session ──
-  const session = await createPravaSession(params);
-
-  // If the mock path pre-baked a token, use it directly
-  if (session.payment_token) {
-    return {
-      paymentToken: session.payment_token,
-      txnLineItemId: `tli_${Math.random().toString(36).slice(2, 10)}`,
-      isMock: true,
-      tokenDetails: {
-        card_number: '4111111111111111',
-        expiry: '12/27',
-        cvv: '737',
-        card_type: 'Visa',
-      },
-    };
-  }
-
-  // ── Poll for the real token ──
-  const result = await getPravaPaymentResult(session.session_id);
-
-  if (!result.payment_token) {
-    throw new Error('Prava did not return a payment token.');
-  }
+  const data = await res.json();
 
   return {
-    paymentToken: result.payment_token,
-    txnLineItemId: result.txn_line_item_id ?? `tli_${Date.now()}`,
-    isMock: false,
-    tokenDetails: result.token_details,
+    session_id: data.session_id,
+    session_token: data.session_token,
+    iframe_url: data.iframe_url,
+    order_id: data.order_id,
+    expires_at: data.expires_at,
+    authorizeOnly: data.authorizeOnly ?? true,
+    _mock: false,
   };
 }
 
-// ─── Report Status ─────────────────────────────────────────────────────────────
+/* ------------------------------------------------------------------ */
+/*  2. List Mandates                                                   */
+/*     GET /v1/mandates?customer_id=...&standing_only=true             */
+/*     Docs: docs.prava.space/api-reference/mandate-list               */
+/* ------------------------------------------------------------------ */
 
-/**
- * Report the final transaction outcome back to Prava.
- * Required to close the mandate loop for audit/compliance.
- */
-export async function reportPravaStatus(params: {
-  sessionId: string;
-  txnRefId: string;
-  status: 'APPROVED' | 'DECLINED';
-}): Promise<void> {
-  const key = process.env.PRAVA_API_KEY;
+export async function listPravaMandates(
+  customerId: string,
+  standingOnly = true,
+): Promise<PravaMandate[]> {
+  const params = new URLSearchParams({
+    customer_id: customerId,
+    standing_only: String(standingOnly),
+  });
 
-  if (isRealKey(key)) {
-    const res = await fetch(
-      `${PRAVA_API_BASE}/sessions/${params.sessionId}/report-status`,
-      {
-        method: 'POST',
-        headers: buildAuthHeader(),
-        body: JSON.stringify({
-          txn_ref_id: params.txnRefId,
-          txn_status: params.status,
-        }),
-      },
+  const res = await fetch(`${PRAVA_BASE}/v1/mandates?${params}`, {
+    method: 'GET',
+    headers: headers(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '(no body)');
+    throw new Error(
+      `Prava listMandates failed: ${res.status} ${res.statusText} — ${text}`,
     );
-
-    if (!res.ok) {
-      const err = await res.text();
-      console.error(`Prava reportStatus failed: ${res.status} — ${err}`);
-      // Non-fatal — log but don't throw, the purchase is already done
-    }
   }
-  // Mock path: no-op
+
+  const data = await res.json();
+  return data.mandates ?? [];
+}
+
+/* ------------------------------------------------------------------ */
+/*  3. Get a single Mandate                                            */
+/*     GET /v1/mandates/{id}                                          */
+/*     Docs: docs.prava.space/api-reference/mandate-get                */
+/* ------------------------------------------------------------------ */
+
+export async function getPravaMandate(mandateId: string): Promise<PravaMandate> {
+  const res = await fetch(`${PRAVA_BASE}/v1/mandates/${mandateId}`, {
+    method: 'GET',
+    headers: headers(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '(no body)');
+    throw new Error(
+      `Prava getMandate failed: ${res.status} ${res.statusText} — ${text}`,
+    );
+  }
+
+  return res.json();
+}
+
+/* ------------------------------------------------------------------ */
+/*  4. Poll until the mandate becomes "active"                         */
+/*     (user completes passkey approval in the hosted iframe)          */
+/* ------------------------------------------------------------------ */
+
+export async function pollMandateActive(
+  customerId: string,
+  opts: { maxAttempts?: number; intervalMs?: number } = {},
+): Promise<PravaMandate | null> {
+  const maxAttempts = opts.maxAttempts ?? 30;
+  const intervalMs = opts.intervalMs ?? 3000;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    const mandates = await listPravaMandates(customerId, true);
+    const active = mandates.find(
+      (m) => m.status === 'active' || m.state === 'available',
+    );
+    if (active) return active;
+
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  5. Charge a Mandate                                                */
+/*     POST /v1/mandates/{id}/charge                                  */
+/*     Docs: docs.prava.space/api-reference/mandate-charge             */
+/* ------------------------------------------------------------------ */
+
+export async function chargePravaMandate(
+  mandateId: string,
+  amount: number,
+  reference?: string,
+): Promise<PravaChargeResult> {
+  const body: Record<string, string> = {
+    amount: amount.toFixed(2),
+  };
+  if (reference) body.reference = reference;
+
+  const res = await fetch(`${PRAVA_BASE}/v1/mandates/${mandateId}/charge`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '(no body)');
+    throw new Error(
+      `Prava chargeMandate failed: ${res.status} ${res.statusText} — ${text}`,
+    );
+  }
+
+  return res.json();
+}
+
+/* ------------------------------------------------------------------ */
+/*  6. Report a Mandate Charge                                         */
+/*     POST /v1/mandates/{id}/charges/{txnId}/report                  */
+/*     Docs: docs.prava.space/api-reference/report-a-mandate-charge    */
+/* ------------------------------------------------------------------ */
+
+export async function reportPravaMandateCharge(
+  mandateId: string,
+  transactionId: string,
+  opts: {
+    txnStatus: 'APPROVED' | 'DECLINED';
+    amountPaid: string;
+    authorizationCode?: string;
+    responseCode?: string;
+  },
+): Promise<PravaReportResult> {
+  const body: Record<string, string> = {
+    txn_status: opts.txnStatus,
+    txn_type: 'PURCHASE',
+    amount_paid: opts.amountPaid,
+  };
+  if (opts.authorizationCode) body.authorization_code = opts.authorizationCode;
+  if (opts.responseCode) body.response_code = opts.responseCode;
+
+  const res = await fetch(
+    `${PRAVA_BASE}/v1/mandates/${mandateId}/charges/${transactionId}/report`,
+    {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(body),
+    },
+  );
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '(no body)');
+    throw new Error(
+      `Prava reportCharge failed: ${res.status} ${res.statusText} — ${text}`,
+    );
+  }
+
+  return res.json();
 }

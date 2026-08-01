@@ -44,6 +44,6 @@
   "domainMocks": {
     "indigo.dev": false,
     "dev.io": false,
-    "tech.ai": false
+    "tech.ai": true
   }
 }

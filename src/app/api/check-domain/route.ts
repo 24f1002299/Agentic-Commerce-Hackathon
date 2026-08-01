@@ -104,7 +104,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { domain, available, action, price, paymentToken } = body;
+    const { domain, available, action, price, paymentToken, cardNumber, expiry, cvv } = body;
 
     if (!domain) {
       return NextResponse.json(
@@ -117,17 +117,29 @@ export async function POST(req: NextRequest) {
 
     // ── Domain Registration (purchase) action ──────────────────────────────────
     if (action === 'register') {
-      if (!paymentToken) {
+      const hasToken = !!paymentToken;
+      const hasCardDetails = !!(cardNumber && expiry && cvv);
+
+      if (!hasToken && !hasCardDetails) {
         return NextResponse.json(
-          { success: false, error: 'Missing required field: paymentToken' },
+          { success: false, error: 'Missing payment method: provide paymentToken OR cardNumber, expiry, cvv' },
           { status: 400 }
         );
       }
 
-      // Validate Prava token format
-      if (!String(paymentToken).startsWith('prv_tok_') && !String(paymentToken).startsWith('prv_sess_')) {
+      if (hasToken) {
+        // Mock tokens are synthetic; live Prava credentials are passed as
+        // cardNumber/expiry/cvv and stay server-side.
+        const isSyntheticToken = String(paymentToken).startsWith('prv_tok_') || String(paymentToken).startsWith('prv_sess_');
+        if (!isSyntheticToken && !hasCardDetails) {
+          return NextResponse.json(
+            { success: false, error: 'Invalid payment method.' },
+            { status: 400 }
+          );
+        }
+      } else if (String(cardNumber).replace(/\s+/g, '').length < 13 || !String(expiry).includes('/') || String(cvv).trim().length < 3) {
         return NextResponse.json(
-          { success: false, error: 'Invalid payment token format. Expected a Prava single-use token.' },
+          { success: false, error: 'Invalid card credentials.' },
           { status: 400 }
         );
       }
