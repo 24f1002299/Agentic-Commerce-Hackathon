@@ -1,3 +1,12 @@
+title: Sentinel Autonomous Procurement
+emoji: 🛡️
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+
+
 # 🛡️ Sentinel: Autonomous Reactive Procurement Agent
 
 > **An AI agent that monitors the web for your trigger conditions and autonomously completes purchases with ironclad financial guardrails.**
