@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { runPlaywrightCheckout } from '@/lib/playwright-checkout';
 import { getProducts } from '@/lib/store-state';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   try {
     const products = getProducts();
