@@ -341,3 +341,34 @@ export async function reportPravaMandateCharge(
 
   return res.json();
 }
+
+/* ------------------------------------------------------------------ */
+/*  7. Find active mandate for a customer (convenience wrapper)        */
+/*     Used by /api/prava/mandate-status polling endpoint              */
+/* ------------------------------------------------------------------ */
+
+export async function findPravaMandate(opts: {
+  customerId: string;
+  amount?: number;
+}): Promise<PravaMandate | null> {
+  const mandates = await listPravaMandates(opts.customerId, true);
+
+  // Find the first active / available mandate
+  let match = mandates.find(
+    (m) => m.status === 'active' || m.state === 'available',
+  );
+
+  // If an amount filter was provided, also verify the approved amount covers it
+  if (match && opts.amount && opts.amount > 0) {
+    const approved = parseFloat(match.approvedAmount || '0');
+    if (approved < opts.amount) {
+      // Mandate exists but doesn't cover the requested amount — still return it
+      // so the caller can decide what to do
+      console.warn(
+        `[findPravaMandate] Mandate ${match.id} approved $${approved} < requested $${opts.amount}`,
+      );
+    }
+  }
+
+  return match ?? null;
+}
