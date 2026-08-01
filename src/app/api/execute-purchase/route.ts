@@ -12,17 +12,19 @@ import {
  * POST /api/execute-purchase
  *
  * Called by:
- *   - monitoring-engine.ts  →  body: { ruleId }
- *   - page.tsx triggerRulePurchase  →  body: { ruleId }
+ *   - monitoring-engine.ts  →  body: { ruleId }          ← ONLY ruleId!
+ *   - page.tsx (manual)     →  body: { ruleId }
+ *
+ * This route looks up everything it needs from the DB.
  *
  * Flow:
- *   1. Look up the Rule from DB (get maxBudget, targetItem, userId)
- *   2. Set Rule status → TRIGGERED
- *   3. Find the active Prava mandate for this customer
- *   4. POST /v1/mandates/{id}/charge  → single-use card credentials
- *   5. Simulate checkout at the store
+ *   1. Look up Rule from DB → get maxBudget, targetItem, userId
+ *   2. Set Rule.status → TRIGGERED
+ *   3. Find active Prava mandate
+ *   4. POST /v1/mandates/{id}/charge → single-use credentials
+ *   5. Simulate checkout
  *   6. POST /v1/mandates/{id}/charges/{txnId}/report → settle with Visa
- *   7. Set Rule status → SUCCESS
+ *   7. Set Rule.status → SUCCESS          ← THIS MAKES THE OVERLAY APPEAR
  *   8. Write audit logs + commerce transaction
  */
 export async function POST(req: NextRequest) {
@@ -43,6 +45,8 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 1. Look up the Rule from DB ──────────────────────────────────
+    //    The monitoring engine only sends { ruleId }. Everything else
+    //    (maxBudget, targetItem, userId) comes from the database.
     const rules = await prisma.$queryRawUnsafe<
       {
         id: string;
@@ -53,8 +57,9 @@ export async function POST(req: NextRequest) {
         naturalLanguageQuery: string;
       }[]
     >(
-      `SELECT id, userId, targetItem, maxBudget, status, naturalLanguageQuery
-       FROM "Rule" WHERE id = '${ruleId}' LIMIT 1;`,
+      `SELECT id, "userId", "targetItem", "maxBudget", status, "naturalLanguageQuery"
+       FROM "Rule" WHERE id = $1 LIMIT 1;`,
+      ruleId,
     );
 
     if (!rules || rules.length === 0) {
@@ -87,20 +92,19 @@ export async function POST(req: NextRequest) {
     // ── 2. Set Rule → TRIGGERED ──────────────────────────────────────
     await prisma.$executeRawUnsafe(`
       UPDATE "Rule" SET status = 'TRIGGERED', "updatedAt" = CURRENT_TIMESTAMP
-      WHERE id = '${ruleId}';
-    `);
+      WHERE id = $1;
+    `, ruleId);
 
     const logIdTriggered = `log_trig_${Date.now()}_1`;
     await prisma.$executeRawUnsafe(`
-      INSERT INTO "AuditLog" (id, ruleId, action, timestamp, uiIcon)
+      INSERT INTO "AuditLog" (id, "ruleId", action, timestamp, "uiIcon")
       VALUES (
-        '${logIdTriggered}',
-        '${ruleId}',
+        $1, $2,
         'Condition met. Initiating autonomous checkout via Prava mandate.',
         CURRENT_TIMESTAMP,
         'zap'
       );
-    `);
+    `, logIdTriggered, ruleId);
 
     // ── 3. Find the active Prava mandate ─────────────────────────────
     const pravaCustomerId =
@@ -112,17 +116,16 @@ export async function POST(req: NextRequest) {
     );
 
     if (!activeMandate) {
-      // Revert rule to ACTIVE so it can retry later
+      // Revert rule to ACTIVE so it can retry on the next polling cycle
       await prisma.$executeRawUnsafe(`
         UPDATE "Rule" SET status = 'ACTIVE', "updatedAt" = CURRENT_TIMESTAMP
-        WHERE id = '${ruleId}';
-      `);
+        WHERE id = $1;
+      `, ruleId);
 
       return NextResponse.json(
         {
           success: false,
-          error:
-            'No active Prava mandate found. Complete passkey approval first.',
+          error: 'No active Prava mandate found. Complete passkey approval first.',
           rule_status: 'ACTIVE',
           mandatesFound: mandates.length,
         },
@@ -145,26 +148,22 @@ export async function POST(req: NextRequest) {
     );
 
     if (chargeResult.status === 'failed') {
-      console.warn(
-        `[execute-purchase] Charge failed: ${chargeResult.errorMessage}`,
-      );
+      console.warn(`[execute-purchase] Charge failed: ${chargeResult.errorMessage}`);
 
-      // Report DECLINED
       try {
-        await reportPravaMandateCharge(
-          mandateId,
-          chargeResult.transactionId,
-          { txnStatus: 'DECLINED', amountPaid: '0.00', responseCode: '05' },
-        );
+        await reportPravaMandateCharge(mandateId, chargeResult.transactionId, {
+          txnStatus: 'DECLINED',
+          amountPaid: '0.00',
+          responseCode: '05',
+        });
       } catch (e: any) {
         console.warn('[execute-purchase] Report DECLINED failed:', e.message);
       }
 
-      // Set rule to FAILED
       await prisma.$executeRawUnsafe(`
         UPDATE "Rule" SET status = 'FAILED', "updatedAt" = CURRENT_TIMESTAMP
-        WHERE id = '${ruleId}';
-      `);
+        WHERE id = $1;
+      `, ruleId);
 
       return NextResponse.json(
         {
@@ -181,30 +180,30 @@ export async function POST(req: NextRequest) {
     // ── 5. Extract single-use card credentials ───────────────────────
     const creds = chargeResult.credentials;
     if (!creds) {
-      throw new Error(
-        'Prava returned no credentials. fetchStatus: ' +
-          chargeResult.fetchStatus,
-      );
+      throw new Error('Prava returned no credentials. fetchStatus: ' + chargeResult.fetchStatus);
     }
 
     console.log(
-      `[execute-purchase] Credentials: ****${creds.token.slice(-4)}, ` +
-        `exp=${creds.expiryMonth}/${creds.expiryYear}`,
+      `[execute-purchase] Credentials: ****${creds.token.slice(-4)}, exp=${creds.expiryMonth}/${creds.expiryYear}`,
     );
 
-    // Write the Prava session audit log (credit-card icon)
+    // Audit log: Prava session charged
     const logIdSession = `log_trig_${Date.now()}_2`;
     await prisma.$executeRawUnsafe(`
-      INSERT INTO "AuditLog" (id, ruleId, action, timestamp, pravaSessionId, uiIcon)
+      INSERT INTO "AuditLog" (id, "ruleId", action, timestamp, "pravaSessionId", "uiIcon")
       VALUES (
-        '${logIdSession}',
-        '${ruleId}',
-        'Prava mandate charged. Single-use card credentials generated (****${creds.token.slice(-4)}).',
+        $1, $2,
+        $3,
         CURRENT_TIMESTAMP,
-        '${mandateId}',
+        $4,
         'credit-card'
       );
-    `);
+    `,
+      logIdSession,
+      ruleId,
+      `Prava mandate charged. Single-use card credentials generated (****${creds.token.slice(-4)}).`,
+      mandateId,
+    );
 
     // ── 6. Simulate checkout at the store ────────────────────────────
     const checkoutResult = {
@@ -229,46 +228,37 @@ export async function POST(req: NextRequest) {
     );
 
     console.log(
-      `[execute-purchase] Visa confirmation: ${reportResult.visaConfirmation}, ` +
-        `mandate status: ${reportResult.mandateStatus}`,
+      `[execute-purchase] Visa: ${reportResult.visaConfirmation}, mandate: ${reportResult.mandateStatus}`,
     );
 
-    // ── 8. Set Rule → SUCCESS ────────────────────────────────────────
+    // ── 8. Set Rule → SUCCESS  ← THIS IS WHAT TRIGGERS THE OVERLAY ──
     await prisma.$executeRawUnsafe(`
       UPDATE "Rule" SET status = 'SUCCESS', "updatedAt" = CURRENT_TIMESTAMP
-      WHERE id = '${ruleId}';
-    `);
+      WHERE id = $1;
+    `, ruleId);
 
     // Insert commerce transaction
     const txId = `tx_${Date.now()}`;
     await prisma.$executeRawUnsafe(`
-      INSERT INTO "CommerceTransaction" (id, userId, itemTitle, amount, status, txHash, createdAt)
-      VALUES (
-        '${txId}',
-        '${rule.userId}',
-        '${targetItem.replace(/'/g, "''")}',
-        ${purchaseAmount},
-        'COMPLETED',
-        '${chargeResult.transactionId}',
-        CURRENT_TIMESTAMP
-      );
-    `);
+      INSERT INTO "CommerceTransaction" (id, "userId", "itemTitle", amount, status, "txHash", "createdAt")
+      VALUES ($1, $2, $3, $4, 'COMPLETED', $5, CURRENT_TIMESTAMP);
+    `, txId, rule.userId, targetItem, purchaseAmount, chargeResult.transactionId);
 
-    // Final success audit log
+    // Final success audit log (uiIcon = 'check-circle' → used by overlay)
     const logIdSuccess = `log_trig_${Date.now()}_3`;
     const receiptUrl = `https://dashboard.prava.space/orders/${chargeResult.orderId}`;
     await prisma.$executeRawUnsafe(`
-      INSERT INTO "AuditLog" (id, ruleId, action, timestamp, pravaSessionId, receiptUrl, uiIcon)
+      INSERT INTO "AuditLog" (id, "ruleId", action, timestamp, "pravaSessionId", "receiptUrl", "uiIcon")
       VALUES (
-        '${logIdSuccess}',
-        '${ruleId}',
-        '${`Autonomous purchase completed: ${targetItem} for $${purchaseAmount.toFixed(2)}. Mandate ${mandateId} charged (txn: ${chargeResult.transactionId}). Visa: ${reportResult.visaConfirmation}.`.replace(/'/g, "''")}',
-        CURRENT_TIMESTAMP,
-        '${mandateId}',
-        '${receiptUrl}',
-        'check-circle'
+        $1, $2, $3, CURRENT_TIMESTAMP, $4, $5, 'check-circle'
       );
-    `);
+    `,
+      logIdSuccess,
+      ruleId,
+      `Autonomous purchase completed: ${targetItem} for $${purchaseAmount.toFixed(2)}. Mandate ${mandateId} charged (txn: ${chargeResult.transactionId}). Visa: ${reportResult.visaConfirmation}.`,
+      mandateId,
+      receiptUrl,
+    );
 
     // ── 9. Success response ──────────────────────────────────────────
     return NextResponse.json({
@@ -297,21 +287,17 @@ export async function POST(req: NextRequest) {
           amountPaid: '0.00',
           responseCode: '99',
         });
-      } catch {
-        // best-effort
-      }
+      } catch { /* best-effort */ }
     }
 
-    // Set rule to FAILED if we have a ruleId
+    // Set rule to FAILED
     if (ruleId) {
       try {
         await prisma.$executeRawUnsafe(`
           UPDATE "Rule" SET status = 'FAILED', "updatedAt" = CURRENT_TIMESTAMP
-          WHERE id = '${ruleId}';
-        `);
-      } catch {
-        // best-effort
-      }
+          WHERE id = $1;
+        `, ruleId);
+      } catch { /* best-effort */ }
     }
 
     return NextResponse.json(

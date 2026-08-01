@@ -13,8 +13,10 @@ const globalForMonitoring = globalThis as unknown as {
 export async function runMonitoringCheck() {
   try {
     // Query only rules with status = 'ACTIVE'
-    const activeRules = await prisma.$queryRawUnsafe<any[]>(
-      `SELECT id, userId, naturalLanguageQuery, targetItem, maxBudget, status FROM "Rule" WHERE status = 'ACTIVE';`
+    const activeRules = await prisma.$queryRawUnsafe<
+      { id: string; userId: string; naturalLanguageQuery: string; targetItem: string; maxBudget: number; status: string }[]
+    >(
+      `SELECT id, "userId", "naturalLanguageQuery", "targetItem", "maxBudget", status FROM "Rule" WHERE status = 'ACTIVE';`,
     );
 
     if (!activeRules || activeRules.length === 0) {
@@ -30,12 +32,13 @@ export async function runMonitoringCheck() {
       const target = rule.targetItem.toLowerCase().trim();
 
       // Determine if it's a domain monitoring rule
-      const isDomain = target.endsWith('.dev') ||
-                       target.endsWith('.com') ||
-                       target.endsWith('.io') ||
-                       target.endsWith('.ai') ||
-                       target.endsWith('.net') ||
-                       target.includes('.');
+      const isDomain =
+        target.endsWith('.dev') ||
+        target.endsWith('.com') ||
+        target.endsWith('.io') ||
+        target.endsWith('.ai') ||
+        target.endsWith('.net') ||
+        target.includes('.');
 
       let shouldExecute = false;
 
@@ -45,10 +48,11 @@ export async function runMonitoringCheck() {
           shouldExecute = true;
         }
       } else {
-        const matchedProduct = products.find(p =>
-          p.name.toLowerCase().includes(target) ||
-          target.includes(p.name.toLowerCase()) ||
-          p.id.toLowerCase().includes(target)
+        const matchedProduct = products.find(
+          (p) =>
+            p.name.toLowerCase().includes(target) ||
+            target.includes(p.name.toLowerCase()) ||
+            p.id.toLowerCase().includes(target),
         );
 
         if (matchedProduct) {
@@ -62,20 +66,33 @@ export async function runMonitoringCheck() {
       }
 
       if (shouldExecute) {
-        console.log(`[Monitoring Engine] Condition met for rule ${rule.id} ("${rule.targetItem}"). Delegating to /api/execute-purchase.`);
+        console.log(
+          `[Monitoring Engine] Condition met for rule ${rule.id} ("${rule.targetItem}"). Delegating to /api/execute-purchase.`,
+        );
 
-        // Delegate to the canonical execution endpoint
-        const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+        // ── FIX: Use the actual server port, not hardcoded 3000 ──────
+        // On HF Spaces PORT=7860; locally PORT=3000 (Next.js default).
+        const port = process.env.PORT || '3000';
+        const baseUrl = `http://localhost:${port}`;
+
         try {
           const res = await fetch(`${baseUrl}/api/execute-purchase`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            // Only send ruleId — the route looks up everything else from DB
             body: JSON.stringify({ ruleId: rule.id }),
           });
           const data = await res.json();
-          console.log(`[Monitoring Engine] execute-purchase result for rule ${rule.id}:`, data.rule_status);
+          console.log(
+            `[Monitoring Engine] execute-purchase result for rule ${rule.id}:`,
+            data.rule_status,
+            data.success ? '✅' : `❌ ${data.error}`,
+          );
         } catch (fetchErr) {
-          console.error(`[Monitoring Engine] Failed to call /api/execute-purchase for rule ${rule.id}:`, fetchErr);
+          console.error(
+            `[Monitoring Engine] Failed to call /api/execute-purchase for rule ${rule.id}:`,
+            fetchErr,
+          );
         }
       }
     }
