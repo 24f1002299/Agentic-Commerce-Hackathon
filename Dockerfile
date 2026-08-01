@@ -1,56 +1,42 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 1 — deps
-# Install production + dev node_modules (cached separately for faster rebuilds)
 # ──────────────────────────────────────────────────────────────────────────────
 FROM node:20-slim AS deps
 
 WORKDIR /app
 
-# Install OpenSSL (required by Prisma) and other OS-level deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  openssl \
-  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
-# Prisma schema must be present for the postinstall `prisma generate` hook
 COPY prisma ./prisma
 RUN npm ci
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 2 — builder
-# Generate Prisma client + build the Next.js standalone output
 # ──────────────────────────────────────────────────────────────────────────────
 FROM node:20-slim AS builder
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  openssl \
-  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 
-# Copy deps from previous stage
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Generate Prisma client (uses node_modules already present)
 RUN npx prisma generate
 
-# Build Next.js — produces .next/standalone + .next/static
-# DATABASE_URL is only needed at runtime; provide a dummy so Prisma client
-# doesn't complain during build-time imports.
 ENV DATABASE_URL="file:./dummy.db"
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stage 3 — runner
-# Minimal production image: standalone Next.js + Playwright Chromium
 # ──────────────────────────────────────────────────────────────────────────────
 FROM node:20-slim AS runner
 
 WORKDIR /app
 
-# ── System dependencies ───────────────────────────────────────────────────────
+# System dependencies for Playwright Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
   openssl \
   ca-certificates \
@@ -76,6 +62,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libxext6 \
   && rm -rf /var/lib/apt/lists/*
 
-# ── Non-root user (HF Spaces security requirement) ────────────────────────────
-RUN addgroup --system --gid 1001 nodejs \
-  && adduser --system --uid 10
+# Non-root user — SINGLE LINE to avoid truncation
+RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 --ingroup nodejs nextjs
+
+# Copy standalone Next.js output
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+
+# Copy Prisma schema + generated client + CLI package
+COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
+
+# FIX: Create a proper symlink for .bin/prisma
+# Docker COPY flattens symlinks into regular files, which breaks Prisma's
+# WASM resolution (prisma_schema_build_bg.wasm resolves relative to __dirname).
+# A real symlink keeps __dirname pointing to prisma/build/ where the WASM lives.
+RUN mkdir -p ./node_modules/.bin && ln -sf ../prisma/build/index.js ./node_modules/.bin/prisma && chown -h nextjs:nodejs ./node_modules/.bin/prisma
+
+COPY --chown=nextjs:nodejs entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
+
+# Install Playwright Chromium
+COPY --from=builder /app/node_modules/playwright ./node_modules/playwright
+COPY --from=builder /app/node_modules/playwright-core ./node_modules/playwright-core
+
+RUN ln -sf ../playwright-core/cli.js ./node_modules/.bin/playwright && chown -h nextjs:nodejs ./node_modules/.bin/playwright || true
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npx playwright install chromium --with-deps && chown -R nextjs:nodejs /ms-playwright || true
+
+# Runtime config
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=7860
+ENV HOSTNAME=0.0.0.0
+ENV DATABASE_URL="file:./dev.db"
+
+USER nextjs
+
+EXPOSE 7860
+
+ENTRYPOINT ["./entrypoint.sh"]
